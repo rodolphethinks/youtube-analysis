@@ -11,6 +11,9 @@ import {
   Globe,
   Subtitles,
   Info,
+  Zap,
+  Play,
+  ChevronRight,
 } from 'lucide-react';
 import { api } from '../api';
 
@@ -236,7 +239,7 @@ export default function NewAnalysis() {
               </div>
 
               {/* Filters */}
-              <div className="grid md:grid-cols-2 gap-4">
+              <div className="grid md:grid-cols-2 gap-4 mt-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Date Range
@@ -261,7 +264,59 @@ export default function NewAnalysis() {
                         className="w-full pl-9 pr-2 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 text-sm"
                         min={dateFrom}
                       />
-                    </div>, 100, 150, 200].map((n) => (
+                    </div>
+                  </div>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Country
+                    <span className="text-gray-400 font-normal ml-1">(Optional)</span>
+                  </label>
+                  <div className="relative">
+                    <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <select
+                      value={regionCode}
+                      onChange={(e) => setRegionCode(e.target.value)}
+                      className="w-full pl-9 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all appearance-none"
+                    >
+                      {countries.map((c) => (
+                        <option key={c.code} value={c.code}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Options */}
+          <div className="mt-8 pt-6 border-t border-gray-100">
+            <h3 className="text-sm font-medium text-gray-700 mb-4 flex items-center gap-2">
+              <Sparkles size={16} className="text-primary-500" />
+              Analysis Options
+            </h3>
+            
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="p-4 bg-gray-50 rounded-xl">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-white rounded-lg shadow-sm">
+                      <Video size={18} className="text-primary-500" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-gray-900">Max Videos</p>
+                      <p className="text-xs text-gray-500">Videos to analyze</p>
+                    </div>
+                  </div>
+                  <select
+                    value={maxVideos}
+                    onChange={(e) => setMaxVideos(Number(e.target.value))}
+                    className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                  >
+                    {[5, 10, 20, 30, 50, 100, 150, 200].map((n) => (
                       <option key={n} value={n}>{n} videos</option>
                     ))}
                   </select>
@@ -315,59 +370,7 @@ export default function NewAnalysis() {
                   >
                     <span
                       className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform shadow ${
-                        useExistingSubtitles
-          {/* Options */}
-          <div className="mt-8 pt-6 border-t border-gray-100">
-            <h3 className="text-sm font-medium text-gray-700 mb-4 flex items-center gap-2">
-              <Sparkles size={16} className="text-primary-500" />
-              Analysis Options
-            </h3>
-            
-            <div className="grid md:grid-cols-2 gap-4">
-              <div className="p-4 bg-gray-50 rounded-xl">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-white rounded-lg shadow-sm">
-                      <Video size={18} className="text-primary-500" />
-                    </div>
-                    <div>
-                      <p className="font-medium text-gray-900">Max Videos</p>
-                      <p className="text-xs text-gray-500">Videos to analyze</p>
-                    </div>
-                  </div>
-                  <select
-                    value={maxVideos}
-                    onChange={(e) => setMaxVideos(Number(e.target.value))}
-                    className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
-                  >
-                    {[5, 10, 20, 30, 50].map((n) => (
-                      <option key={n} value={n}>{n} videos</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="p-4 bg-gray-50 rounded-xl">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-white rounded-lg shadow-sm">
-                      <Mic size={18} className="text-violet-500" />
-                    </div>
-                    <div>
-                      <p className="font-medium text-gray-900">Transcription</p>
-                      <p className="text-xs text-gray-500">Audio to text</p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setSkipTranscription(!skipTranscription)}
-                    className={`relative w-12 h-6 rounded-full transition-colors ${
-                      !skipTranscription ? 'bg-primary-500' : 'bg-gray-300'
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform shadow ${
-                        !skipTranscription ? 'translate-x-6' : ''
+                        useExistingSubtitles ? 'translate-x-6' : ''
                       }`}
                     />
                   </button>

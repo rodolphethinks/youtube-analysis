@@ -8,7 +8,6 @@ import {
   Youtube,
   Menu,
   X,
-  Bell,
   Search,
   ChevronRight,
 } from 'lucide-react';

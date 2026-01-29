@@ -2,9 +2,6 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Video,
-  Clock,
-  CheckCircle2,
-  XCircle,
   Loader2,
   Trash2,
   ArrowRight,
@@ -12,7 +9,6 @@ import {
   Filter,
   Eye,
   ExternalLink,
-  MoreHorizontal,
 } from 'lucide-react';
 import { api, Job } from '../api';
 

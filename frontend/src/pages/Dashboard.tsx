@@ -3,9 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   Video,
   TrendingUp,
-  Clock,
   CheckCircle2,
-  XCircle,
   Loader2,
   ArrowRight,
   Play,

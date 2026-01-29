@@ -25,4 +25,6 @@ seaborn>=0.12.0
 
 # Progress bars
 tqdm>=4.66.0
+
+# YouTube transcript API
 youtube-transcript-api>=0.6.0

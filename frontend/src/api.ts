@@ -115,7 +115,7 @@ export const api = {
   },
 
   // Get job results
-  getJobResults: async (jobId: string): Promise<AnalysisResult[]> => {
+  getJobResults: async (jobId: string): Promise<JobResult[]> => {
     const res = await axios.get(`${API_BASE}/jobs/${jobId}/results`);
     return res.data;
   },

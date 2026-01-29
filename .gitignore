@@ -12,3 +12,5 @@ audio/
 downloads/
 output/
 history.db
+youtube_analysis_pipeline.ipynb
+youtube-koleos-to-insights.ipynb

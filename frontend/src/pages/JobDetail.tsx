@@ -15,19 +15,12 @@ import {
   Minus,
   RefreshCw,
   ExternalLink,
-  Sparkles,
-  TrendingUp,
-  Eye,
 } from 'lucide-react';
 import {
   PieChart,
   Pie,
   Cell,
   ResponsiveContainer,
-  AreaChart,
-  Area,
-  XAxis,
-  Tooltip,
 } from 'recharts';
 import { api, Job, JobResult } from '../api';
 
@@ -59,12 +52,6 @@ function SentimentIcon({ sentiment }: { sentiment: string }) {
     return <Minus className="text-gray-400" size={18} />;
   }
 }
-
-const SENTIMENT_COLORS: Record<string, string> = {
-  positive: '#10b981',
-  negative: '#ef4444',
-  neutral: '#9ca3af',
-};
 
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>();
