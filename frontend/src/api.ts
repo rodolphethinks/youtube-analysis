@@ -58,12 +58,20 @@ export const api = {
   analyzePredefined: async (
     modelKey: string,
     skipTranscription: boolean = true,
-    maxVideos: number = 20
+    maxVideos: number = 20,
+    dateFrom?: string | null,
+    dateTo?: string | null,
+    regionCode?: string | null,
+    useExistingSubtitles?: boolean
   ): Promise<Job> => {
     const res = await axios.post(`${API_BASE}/analyze/predefined`, {
       model_key: modelKey,
       skip_transcription: skipTranscription,
       max_videos: maxVideos,
+      date_from: dateFrom,
+      date_to: dateTo,
+      region_code: regionCode,
+      use_existing_subtitles: useExistingSubtitles,
     });
     return res.data;
   },
@@ -74,7 +82,11 @@ export const api = {
     model: string,
     queries: string[] | null,
     skipTranscription: boolean = true,
-    maxVideos: number = 20
+    maxVideos: number = 20,
+    dateFrom?: string | null,
+    dateTo?: string | null,
+    regionCode?: string | null,
+    useExistingSubtitles?: boolean
   ): Promise<Job> => {
     const res = await axios.post(`${API_BASE}/analyze/custom`, {
       company,
@@ -82,6 +94,10 @@ export const api = {
       search_queries: queries,
       skip_transcription: skipTranscription,
       max_videos: maxVideos,
+      date_from: dateFrom,
+      date_to: dateTo,
+      region_code: regionCode,
+      use_existing_subtitles: useExistingSubtitles,
     });
     return res.data;
   },

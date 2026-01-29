@@ -100,13 +100,21 @@ class CarModelRequest(BaseModel):
     model: str = Field(..., example="Scenic E-Tech")
     search_queries: Optional[List[str]] = Field(None, example=["르노 세닉 리뷰", "세닉 전기차"])
     skip_transcription: bool = Field(True, description="Skip audio transcription for faster analysis")
-    max_videos: int = Field(20, ge=1, le=100)
+    max_videos: int = Field(20, ge=1, le=200)
+    date_from: Optional[str] = Field(None, example="2024-01-01")
+    date_to: Optional[str] = Field(None, example="2024-12-31")
+    region_code: Optional[str] = Field(None, example="US")
+    use_existing_subtitles: bool = Field(False, description="Use existing YouTube subtitles if available")
 
 
 class PredefinedModelRequest(BaseModel):
     model_key: str = Field(..., example="scenic")
     skip_transcription: bool = True
     max_videos: int = 20
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    region_code: Optional[str] = None
+    use_existing_subtitles: bool = False
 
 
 class JobStatus(BaseModel):
@@ -146,7 +154,16 @@ PREDEFINED_MODELS = {
 }
 
 
-def run_analysis_job(job_id: str, car_model: CarModel, skip_transcription: bool, max_videos: int):
+def run_analysis_job(
+    job_id: str, 
+    car_model: CarModel, 
+    skip_transcription: bool, 
+    max_videos: int,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    region_code: Optional[str] = None,
+    use_existing_subtitles: bool = False
+):
     """Background task to run the analysis pipeline."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -165,7 +182,18 @@ def run_analysis_job(job_id: str, car_model: CarModel, skip_transcription: bool,
         config = PipelineConfig(
             google_api_key=api_key,
             output_dir=str(Path(__file__).parent.parent / "output"),
+            # Update config with request parameters
+            max_search_results=max_videos, # Use max_videos for search results limit roughly
         )
+        # Apply filters to config
+        if date_from:
+            config.published_after = f"{date_from}T00:00:00Z"
+        if date_to:
+            config.published_before = f"{date_to}T23:59:59Z"
+        if region_code:
+            config.region_code = region_code
+        config.use_existing_subtitles = use_existing_subtitles
+
         pipeline = YouTubeAnalysisPipeline(config)
         
         # Run discovery
@@ -272,7 +300,16 @@ async def analyze_predefined(request: PredefinedModelRequest, background_tasks: 
         raise HTTPException(status_code=400, detail=f"Unknown model: {request.model_key}")
     
     car_model = PREDEFINED_MODELS[request.model_key]
-    return await _create_job(car_model, request.skip_transcription, request.max_videos, background_tasks)
+    return await _create_job(
+        car_model, 
+        request.skip_transcription, 
+        request.max_videos, 
+        background_tasks,
+        date_from=request.date_from,
+        date_to=request.date_to,
+        region_code=request.region_code,
+        use_existing_subtitles=request.use_existing_subtitles
+    )
 
 
 @app.post("/api/analyze/custom", response_model=JobStatus)
@@ -283,10 +320,28 @@ async def analyze_custom(request: CarModelRequest, background_tasks: BackgroundT
         model=request.model,
         search_queries=request.search_queries or []
     )
-    return await _create_job(car_model, request.skip_transcription, request.max_videos, background_tasks)
+    return await _create_job(
+        car_model, 
+        request.skip_transcription, 
+        request.max_videos, 
+        background_tasks,
+        date_from=request.date_from,
+        date_to=request.date_to,
+        region_code=request.region_code,
+        use_existing_subtitles=request.use_existing_subtitles
+    )
 
 
-async def _create_job(car_model: CarModel, skip_transcription: bool, max_videos: int, background_tasks: BackgroundTasks):
+async def _create_job(
+    car_model: CarModel, 
+    skip_transcription: bool, 
+    max_videos: int, 
+    background_tasks: BackgroundTasks,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    region_code: Optional[str] = None,
+    use_existing_subtitles: bool = False
+):
     """Create a new analysis job."""
     job_id = str(uuid.uuid4())[:8]
     search_query = car_model.search_queries[0] if car_model.search_queries else f"{car_model.company} {car_model.model} 리뷰"
@@ -303,7 +358,17 @@ async def _create_job(car_model: CarModel, skip_transcription: bool, max_videos:
     conn.close()
     
     # Start background job
-    background_tasks.add_task(run_analysis_job, job_id, car_model, skip_transcription, max_videos)
+    background_tasks.add_task(
+        run_analysis_job, 
+        job_id, 
+        car_model, 
+        skip_transcription, 
+        max_videos,
+        date_from,
+        date_to,
+        region_code,
+        use_existing_subtitles
+    )
     
     return JobStatus(
         id=job_id,

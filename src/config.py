@@ -43,7 +43,12 @@ class PipelineConfig:
     # Search Parameters
     max_search_results: int = 50
     published_after: str = "2024-04-01T00:00:00Z"
+    published_before: Optional[str] = None
+    region_code: Optional[str] = None
     max_comments_per_video: int = 100
+    
+    # Transcription Settings
+    use_existing_subtitles: bool = False
     
     # Output Directories
     output_dir: str = "output"

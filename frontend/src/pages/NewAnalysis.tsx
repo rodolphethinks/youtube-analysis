@@ -5,12 +5,12 @@ import {
   Search,
   Sparkles,
   Loader2,
-  Play,
   Video,
   Mic,
-  ChevronRight,
+  Calendar,
+  Globe,
+  Subtitles,
   Info,
-  Zap,
 } from 'lucide-react';
 import { api } from '../api';
 
@@ -37,8 +37,24 @@ export default function NewAnalysis() {
   const [customQueries, setCustomQueries] = useState('');
   const [skipTranscription, setSkipTranscription] = useState(true);
   const [maxVideos, setMaxVideos] = useState(20);
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [regionCode, setRegionCode] = useState('');
+  const [useExistingSubtitles, setUseExistingSubtitles] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const countries = [
+    { code: '', name: 'Global (All Countries)' },
+    { code: 'US', name: 'United States' },
+    { code: 'KR', name: 'South Korea' },
+    { code: 'GB', name: 'United Kingdom' },
+    { code: 'FR', name: 'France' },
+    { code: 'DE', name: 'Germany' },
+    { code: 'JP', name: 'Japan' },
+    { code: 'CA', name: 'Canada' },
+    { code: 'AU', name: 'Australia' },
+  ];
 
   useEffect(() => {
     loadModels();
@@ -64,12 +80,30 @@ export default function NewAnalysis() {
     try {
       let job;
       if (activeTab === 'predefined') {
-        job = await api.analyzePredefined(selectedModel, skipTranscription, maxVideos);
+        job = await api.analyzePredefined(
+          selectedModel, 
+          skipTranscription, 
+          maxVideos,
+          dateFrom || null,
+          dateTo || null,
+          regionCode || null,
+          useExistingSubtitles
+        );
       } else {
         const queries = customQueries
           ? customQueries.split('\n').filter((q) => q.trim())
           : null;
-        job = await api.analyzeCustom(customCompany, customModel, queries, skipTranscription, maxVideos);
+        job = await api.analyzeCustom(
+          customCompany, 
+          customModel, 
+          queries, 
+          skipTranscription, 
+          maxVideos,
+          dateFrom || null,
+          dateTo || null,
+          regionCode || null,
+          useExistingSubtitles
+        );
       }
       navigate(`/job/${job.id}`);
     } catch (err: any) {
@@ -200,9 +234,88 @@ export default function NewAnalysis() {
                   className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all resize-none"
                 />
               </div>
-            </div>
-          )}
 
+              {/* Filters */}
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Date Range
+                    <span className="text-gray-400 font-normal ml-1">(Optional)</span>
+                  </label>
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="date"
+                        value={dateFrom}
+                        onChange={(e) => setDateFrom(e.target.value)}
+                        className="w-full pl-9 pr-2 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 text-sm"
+                      />
+                    </div>
+                    <div className="relative flex-1">
+                      <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        type="date"
+                        value={dateTo}
+                        onChange={(e) => setDateTo(e.target.value)}
+                        className="w-full pl-9 pr-2 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 text-sm"
+                        min={dateFrom}
+                      />
+                    </div>, 100, 150, 200].map((n) => (
+                      <option key={n} value={n}>{n} videos</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="p-4 bg-gray-50 rounded-xl">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-white rounded-lg shadow-sm">
+                      <Mic size={18} className="text-violet-500" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-gray-900">Transcription</p>
+                      <p className="text-xs text-gray-500">Audio to text</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSkipTranscription(!skipTranscription)}
+                    className={`relative w-12 h-6 rounded-full transition-colors ${
+                      !skipTranscription ? 'bg-primary-500' : 'bg-gray-300'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform shadow ${
+                        !skipTranscription ? 'translate-x-6' : ''
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+
+               <div className="p-4 bg-gray-50 rounded-xl">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-white rounded-lg shadow-sm">
+                      <Subtitles size={18} className="text-blue-500" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-gray-900">Use Subtitles</p>
+                      <p className="text-xs text-gray-500">Try YouTube captions first</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setUseExistingSubtitles(!useExistingSubtitles)}
+                    className={`relative w-12 h-6 rounded-full transition-colors ${
+                      useExistingSubtitles ? 'bg-primary-500' : 'bg-gray-300'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform shadow ${
+                        useExistingSubtitles
           {/* Options */}
           <div className="mt-8 pt-6 border-t border-gray-100">
             <h3 className="text-sm font-medium text-gray-700 mb-4 flex items-center gap-2">

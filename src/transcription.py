@@ -203,6 +203,20 @@ class TranscriptionService:
         """Transcribe a single video with retry logic."""
         video_id = url.split("v=")[-1]
         
+        # Try fetching existing captions first if enabled
+        if self.config.use_existing_subtitles:
+            print(f"Attempting to fetch existing captions for {video_id}...")
+            captions = self.fetch_captions(video_id)
+            if captions:
+                print(f"Found existing captions for {video_id}")
+                return TranscriptionResult(
+                    video_url=url,
+                    video_id=video_id,
+                    transcript=captions,
+                    success=True
+                )
+            print(f"No captions found, falling back to Whisper...")
+
         for attempt in range(max_retries + 1):
             try:
                 # Download audio
@@ -254,3 +268,16 @@ class TranscriptionService:
             success=False,
             error_message="Max retries exceeded"
         )
+
+    def fetch_captions(self, video_id: str, languages=['ko', 'en']) -> Optional[str]:
+        """Fetch existing captions from YouTube."""
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+            
+            # Combine text parts
+            full_text = " ".join([t['text'] for t in transcript_list])
+            return full_text
+        except Exception as e:
+            # print(f"Could not fetch captions for {video_id}: {e}")
+            return None

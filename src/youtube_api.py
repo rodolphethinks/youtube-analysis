@@ -76,7 +76,9 @@ class YouTubeClient:
         self, 
         query: str, 
         max_results: int = 50, 
-        published_after: Optional[str] = None
+        published_after: Optional[str] = None,
+        published_before: Optional[str] = None,
+        region_code: Optional[str] = None
     ) -> Dict[str, str]:
         """
         Search for videos matching query.
@@ -85,13 +87,19 @@ class YouTubeClient:
             Dictionary mapping video URLs to video IDs.
         """
         try:
-            request = self.youtube.search().list(
-                part="snippet",
-                maxResults=max_results,
-                q=query,
-                type="video",
-                publishedAfter=published_after,
-            )
+            kwargs = {
+                "part": "snippet",
+                "maxResults": max_results,
+                "q": query,
+                "type": "video",
+                "publishedAfter": published_after,
+            }
+            if published_before:
+                kwargs["publishedBefore"] = published_before
+            if region_code:
+                kwargs["regionCode"] = region_code
+
+            request = self.youtube.search().list(**kwargs)
             response = request.execute()
             
             return {
@@ -191,7 +199,9 @@ class VideoDiscovery:
             results = self.client.search_videos(
                 query=query,
                 max_results=self.config.max_search_results,
-                published_after=self.config.published_after
+                published_after=self.config.published_after,
+                published_before=self.config.published_before,
+                region_code=self.config.region_code
             )
             video_dict.update(results)
             time.sleep(0.1)  # Rate limiting
