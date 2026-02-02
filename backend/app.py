@@ -183,10 +183,15 @@ def run_analysis_job(
         if not api_key:
             raise ValueError("Server configuration error. Please contact administrator.")
         
-        # Create pipeline
+        # Create unique output directory for this job
+        base_output_dir = Path(__file__).parent.parent / "output"
+        job_output_dir = base_output_dir / f"{car_model.identifier}_{job_id}"
+        job_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create pipeline with job-specific output directory
         config = PipelineConfig(
             google_api_key=api_key,
-            output_dir=str(Path(__file__).parent.parent / "output"),
+            output_dir=str(job_output_dir),
             # Update config with request parameters
             max_search_results=max_videos, # Use max_videos for search results limit roughly
         )
@@ -320,9 +325,11 @@ def run_analysis_job(
         # Generate reports
         outputs = pipeline.run_reporting(car_model)
         report_filename = None
+        base_output_dir = Path(__file__).parent.parent / "output"
         for key, path in outputs.items():
             if str(path).endswith('.docx'):
-                report_filename = Path(path).name
+                # Store relative path from base output dir (includes subfolder)
+                report_filename = str(Path(path).relative_to(base_output_dir))
                 break
         
         # Update job as completed
@@ -545,16 +552,21 @@ async def delete_job(job_id: str):
     return {"status": "deleted"}
 
 
-@app.get("/api/download/{filename}")
+@app.get("/api/download/{filename:path}")
 async def download_file(filename: str):
-    """Download a generated report file."""
+    """Download a generated report file. Supports subfolder paths."""
     output_dir = Path(__file__).parent.parent / "output"
-    file_path = output_dir / filename
+    # Sanitize path to prevent directory traversal
+    file_path = (output_dir / filename).resolve()
+    if not str(file_path).startswith(str(output_dir.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     
-    return FileResponse(file_path, filename=filename)
+    # Use just the filename for the download name
+    download_name = file_path.name
+    return FileResponse(file_path, filename=download_name)
 
 
 if __name__ == "__main__":
