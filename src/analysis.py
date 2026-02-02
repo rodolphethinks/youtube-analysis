@@ -38,7 +38,8 @@ class VideoAnalysis:
     sentiment_score: int
     key_strengths: List[str]
     key_weaknesses: List[str]
-    renault_brand_sentiment: str
+    brand_sentiment: str  # Sentiment for the analyzed car's brand
+    renault_brand_sentiment: str  # Renault-specific perception (for competitive insight)
     competitor_mentions: List[CompetitorMention]
     trends: List[str]
     battery_performance: str
@@ -106,7 +107,9 @@ Key Strengths Highlighted: Identify the main positive aspects the influencer men
 Key Weaknesses Highlighted: Identify the main negative aspects the influencer mentions (e.g., high price, poor fuel economy, lack of features).
 Do not hesitate to point them out.
 
-Comments on Renault Brand: Does the influencer mention Renault as a brand? If so, is the sentiment positive, neutral, or negative?
+Comments on {car_model.company} Brand: Does the influencer mention {car_model.company} as a brand? If so, is the sentiment positive, neutral, or negative?
+
+Renault Brand Perception (if mentioned): Even if this video is about a different brand, does the influencer mention Renault? If so, what is said about Renault and is the sentiment positive, neutral, or negative? Return "Not mentioned" if Renault is not discussed.
 
 Comparison to Competitors: If the video mentions other car brands/models, list them and summarize the comparisons.
 
@@ -128,7 +131,8 @@ Return ONLY valid JSON in the following format (no markdown code blocks):
   }},
   "key_strengths": ["Spacious interior", "Fuel efficiency", "Modern technology"],
   "key_weaknesses": ["Expensive", "Limited color options"],
-  "renault_brand_sentiment": "Neutral",
+  "brand_sentiment": "Neutral",
+  "renault_brand_sentiment": "Not mentioned",
   "competitor_mentions": [
     {{
       "competitor": "Toyota RAV4",
@@ -172,7 +176,8 @@ Return ONLY valid JSON in the following format (no markdown code blocks):
                 sentiment_score=data.get("sentiment_analysis", {}).get("score", 50),
                 key_strengths=data.get("key_strengths", []),
                 key_weaknesses=data.get("key_weaknesses", []),
-                renault_brand_sentiment=data.get("renault_brand_sentiment", "N/A"),
+                brand_sentiment=data.get("brand_sentiment", "N/A"),
+                renault_brand_sentiment=data.get("renault_brand_sentiment", "Not mentioned"),
                 competitor_mentions=[
                     CompetitorMention(c.get("competitor", ""), c.get("comparison_summary", ""))
                     for c in data.get("competitor_mentions", [])
@@ -193,6 +198,7 @@ Return ONLY valid JSON in the following format (no markdown code blocks):
                 sentiment_score=50,
                 key_strengths=[],
                 key_weaknesses=[],
+                brand_sentiment="N/A",
                 renault_brand_sentiment="N/A",
                 competitor_mentions=[],
                 trends=[],
@@ -355,6 +361,7 @@ def analysis_to_dataframe(analyses: List[VideoAnalysis]) -> pd.DataFrame:
             "Sentiment Score": analysis.sentiment_score,
             "Key Strengths": ", ".join(analysis.key_strengths),
             "Key Weaknesses": ", ".join(analysis.key_weaknesses),
+            "Brand Sentiment": analysis.brand_sentiment,
             "Renault Brand Sentiment": analysis.renault_brand_sentiment,
             "Competitor Mentions": ", ".join([c.competitor for c in analysis.competitor_mentions]),
             "Comparison Summary": " | ".join([c.comparison_summary for c in analysis.competitor_mentions]),

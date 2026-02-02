@@ -124,6 +124,63 @@ class YouTubeAnalysisPipeline:
         
         return transcriptions
     
+    def run_caption_fetch_only(
+        self, 
+        car_model: CarModel,
+        max_videos: int = 20
+    ) -> Dict[str, str]:
+        """
+        Fetch existing YouTube captions without using Whisper.
+        This is faster and cheaper than full transcription.
+        
+        Args:
+            car_model: Car model being analyzed
+            max_videos: Maximum number of videos to fetch captions for
+            
+        Returns:
+            Dictionary mapping URLs to caption text
+        """
+        print(f"\n{'='*60}")
+        print(f"STAGE 3: Fetching Existing Captions (No Whisper)")
+        print(f"{'='*60}\n")
+        
+        model_id = car_model.identifier
+        
+        if model_id not in self.results or 'videos_df' not in self.results[model_id]:
+            print("No videos discovered yet. Run discovery first.")
+            return {}
+        
+        video_urls = self.results[model_id]['videos_df']['Video URL'].tolist()[:max_videos]
+        
+        from .transcription import TranscriptionService
+        transcription_service = TranscriptionService(
+            self.config,
+            whisper_model="large-v3",  # Won't be used
+            cleanup_audio=True
+        )
+        
+        captions = {}
+        from tqdm import tqdm
+        with tqdm(total=len(video_urls), desc="Fetching captions", unit="video") as pbar:
+            for url in video_urls:
+                video_id = url.split("v=")[-1]
+                caption_text = transcription_service.fetch_captions(video_id)
+                if caption_text:
+                    captions[url] = caption_text
+                    print(f"✓ Found captions for {video_id}")
+                else:
+                    print(f"✗ No captions for {video_id}")
+                pbar.update(1)
+        
+        print(f"\nFound captions for {len(captions)}/{len(video_urls)} videos")
+        
+        # Store results
+        if model_id not in self.results:
+            self.results[model_id] = {}
+        self.results[model_id]['transcriptions'] = captions
+        
+        return captions
+    
     def run_analysis(
         self, 
         car_model: CarModel,
@@ -141,15 +198,18 @@ class YouTubeAnalysisPipeline:
         
         model_id = car_model.identifier
         
-        # Get transcriptions
+        # Get transcriptions (optional - can analyze without them)
         if transcriptions is None:
-            if model_id not in self.results or 'transcriptions' not in self.results[model_id]:
-                print("No transcriptions available. Run transcription first.")
-                return [], {}
-            transcriptions = self.results[model_id]['transcriptions']
+            if model_id in self.results and 'transcriptions' in self.results[model_id]:
+                transcriptions = self.results[model_id]['transcriptions']
+            else:
+                print("No transcriptions available. Proceeding with comment analysis only.")
+                transcriptions = {}
         
-        # Analyze transcripts
-        video_analyses = self.video_analyzer.analyze_multiple(transcriptions, car_model)
+        # Analyze transcripts (if available)
+        video_analyses = []
+        if transcriptions:
+            video_analyses = self.video_analyzer.analyze_multiple(transcriptions, car_model)
         
         # Analyze comments
         comments_df = self.results.get(model_id, {}).get('comments_df', pd.DataFrame())
@@ -157,8 +217,9 @@ class YouTubeAnalysisPipeline:
         
         if not comments_df.empty:
             # Group comments by video
-            comments_by_video = comments_df.groupby("Video ID").apply(
-                lambda x: "\n".join(x["Comment"].tolist())
+            comments_by_video = comments_df.groupby("Video ID", group_keys=False).apply(
+                lambda x: "\n".join(x["Comment"].tolist()),
+                include_groups=False
             ).to_dict()
             
             # Convert Video ID to URL

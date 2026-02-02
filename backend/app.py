@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+
+# Load .env file from project root
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -30,7 +35,7 @@ DB_PATH = Path(__file__).parent / "history.db"
 
 def init_db():
     """Initialize SQLite database for job history."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
@@ -165,7 +170,7 @@ def run_analysis_job(
     use_existing_subtitles: bool = False
 ):
     """Background task to run the analysis pipeline."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     
     try:
@@ -176,7 +181,7 @@ def run_analysis_job(
         # Get API key
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
-            raise ValueError("GOOGLE_API_KEY not set")
+            raise ValueError("Server configuration error. Please contact administrator.")
         
         # Create pipeline
         config = PipelineConfig(
@@ -199,6 +204,19 @@ def run_analysis_job(
         # Run discovery
         videos_df, comments_df = pipeline.run_discovery(car_model)
         
+        # Limit to max_videos requested by user
+        if len(videos_df) > max_videos:
+            print(f"Limiting from {len(videos_df)} to {max_videos} videos as requested")
+            videos_df = videos_df.head(max_videos)
+            # Update pipeline results with limited videos
+            model_id = car_model.identifier
+            pipeline.results[model_id]['videos_df'] = videos_df
+            # Re-filter comments to only include limited videos
+            if not comments_df.empty:
+                video_ids = videos_df['Video ID'].tolist()
+                comments_df = comments_df[comments_df['Video ID'].isin(video_ids)]
+                pipeline.results[model_id]['comments_df'] = comments_df
+        
         cursor.execute(
             "UPDATE jobs SET videos_found = ?, comments_collected = ? WHERE id = ?",
             (len(videos_df), len(comments_df), job_id)
@@ -213,20 +231,25 @@ def run_analysis_job(
             conn.commit()
             return
         
-        # Run transcription if enabled
+        # Run transcription if enabled, OR fetch captions if use_existing_subtitles is enabled
         if not skip_transcription:
             pipeline.run_transcription(car_model, max_videos=max_videos)
+        elif use_existing_subtitles:
+            # Only fetch existing captions, don't use Whisper
+            pipeline.run_caption_fetch_only(car_model, max_videos=max_videos)
         
         # Run analysis
         video_analyses, comment_analyses = pipeline.run_analysis(car_model)
         
+        # Count analyzed (either transcripts or comments)
+        analyzed_count = len(video_analyses) if video_analyses else len(comment_analyses)
         cursor.execute(
             "UPDATE jobs SET videos_analyzed = ? WHERE id = ?",
-            (len(video_analyses), job_id)
+            (analyzed_count, job_id)
         )
         conn.commit()
         
-        # Store results
+        # Store results from video analyses (transcripts)
         for analysis in video_analyses:
             # Find video details from URL
             video_id = analysis.video_url.split("v=")[-1] if "v=" in analysis.video_url else analysis.video_url
@@ -252,6 +275,46 @@ def run_analysis_job(
                 weaknesses_str,
                 analysis.final_verdict
             ))
+        
+        # If no video analyses, store results from comment analyses
+        if not video_analyses and comment_analyses:
+            for video_url, analysis in comment_analyses.items():
+                video_id = video_url.split("v=")[-1] if "v=" in video_url else video_url
+                video_row = videos_df[videos_df['Video URL'] == video_url]
+                title = video_row['Title'].iloc[0] if not video_row.empty else "Unknown"
+                channel = video_row['Channel Title'].iloc[0] if not video_row.empty else "Unknown"
+                
+                # Determine overall sentiment from breakdown
+                sentiment_breakdown = analysis.sentiment_breakdown or {}
+                positive = sentiment_breakdown.get('positive', 0)
+                negative = sentiment_breakdown.get('negative', 0)
+                neutral = sentiment_breakdown.get('neutral', 0)
+                
+                if positive > negative and positive > neutral:
+                    sentiment = "Positive"
+                elif negative > positive and negative > neutral:
+                    sentiment = "Negative"
+                else:
+                    sentiment = "Neutral"
+                
+                # Build summary from themes
+                themes_str = ", ".join(analysis.themes[:5]) if analysis.themes else ""
+                keywords_str = ", ".join(analysis.keywords[:10]) if analysis.keywords else ""
+                
+                cursor.execute("""
+                    INSERT INTO results (job_id, video_id, video_title, channel_name, sentiment,
+                        strengths, weaknesses, summary)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    job_id,
+                    video_id,
+                    title,
+                    channel,
+                    sentiment,
+                    themes_str,  # Use themes as "strengths" for display
+                    keywords_str,  # Use keywords as info
+                    f"Themes: {themes_str}. Sentiment: {positive:.0f}% positive, {negative:.0f}% negative."
+                ))
         conn.commit()
         
         # Generate reports
@@ -346,7 +409,7 @@ async def _create_job(
     job_id = str(uuid.uuid4())[:8]
     search_query = car_model.search_queries[0] if car_model.search_queries else f"{car_model.company} {car_model.model} 리뷰"
     
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO jobs (id, car_company, car_model, search_query, status, created_at, videos_found, 
@@ -389,7 +452,7 @@ async def _create_job(
 @app.get("/api/jobs", response_model=List[JobStatus])
 async def get_jobs():
     """Get all job history."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM jobs ORDER BY created_at DESC")
@@ -418,7 +481,7 @@ async def get_jobs():
 @app.get("/api/jobs/{job_id}", response_model=JobStatus)
 async def get_job(job_id: str):
     """Get specific job status."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
@@ -447,7 +510,7 @@ async def get_job(job_id: str):
 @app.get("/api/jobs/{job_id}/results", response_model=List[AnalysisResult])
 async def get_job_results(job_id: str):
     """Get analysis results for a job."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM results WHERE job_id = ?", (job_id,))
@@ -473,7 +536,7 @@ async def get_job_results(job_id: str):
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str):
     """Delete a job and its results."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM results WHERE job_id = ?", (job_id,))
     cursor.execute("DELETE FROM jobs WHERE id = ?", (job_id,))

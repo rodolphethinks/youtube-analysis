@@ -101,16 +101,20 @@ Provide the analysis in the following structured format:
         filename: str,
         car_model: "CarModel"
     ) -> Path:
-        """Save report to Word document."""
+        """Save report to Word document with proper markdown parsing."""
         try:
             from docx import Document
-            from docx.shared import Pt, Inches
+            from docx.shared import Pt, Inches, RGBColor
             from docx.enum.text import WD_ALIGN_PARAGRAPH
+            from docx.enum.style import WD_STYLE_TYPE
         except ImportError:
             print("python-docx not installed. Saving as text file instead.")
             return self.save_to_text(report_text, filename.replace('.docx', '.txt'))
         
         doc = Document()
+        
+        # Set up styles
+        styles = doc.styles
         
         # Title
         title = doc.add_heading(
@@ -125,30 +129,122 @@ Provide the analysis in the following structured format:
         
         doc.add_paragraph()  # Spacer
         
-        # Process report sections
-        for section in report_text.split('\n\n'):
-            section = section.strip()
-            if not section:
-                continue
-            
-            if section.startswith('## '):
-                # Main heading
-                doc.add_heading(section[3:], level=1)
-            elif section.startswith('### '):
-                # Subheading
-                doc.add_heading(section[4:], level=2)
-            elif section.startswith('- '):
-                # Bullet points
-                for line in section.split('\n'):
-                    if line.strip().startswith('- '):
-                        doc.add_paragraph(line.strip()[2:], style='List Bullet')
-            else:
-                doc.add_paragraph(section)
+        # Parse markdown and convert to docx
+        self._parse_markdown_to_docx(doc, report_text)
         
         output_path = self.output_dir / filename
         doc.save(str(output_path))
         print(f"Report saved to: {output_path}")
         return output_path
+    
+    def _parse_markdown_to_docx(self, doc, markdown_text: str):
+        """Parse markdown text and add formatted content to document."""
+        import re
+        from docx.shared import Pt, RGBColor
+        
+        lines = markdown_text.split('\n')
+        i = 0
+        in_list = False
+        list_indent_level = 0
+        
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            
+            # Skip empty lines but end lists
+            if not stripped:
+                in_list = False
+                i += 1
+                continue
+            
+            # Headers
+            if stripped.startswith('#### '):
+                doc.add_heading(stripped[5:], level=4)
+                in_list = False
+            elif stripped.startswith('### '):
+                doc.add_heading(stripped[4:], level=3)
+                in_list = False
+            elif stripped.startswith('## '):
+                doc.add_heading(stripped[3:], level=2)
+                in_list = False
+            elif stripped.startswith('# '):
+                doc.add_heading(stripped[2:], level=1)
+                in_list = False
+            
+            # Bullet points (-, *, or numbered)
+            elif re.match(r'^[-*]\s+', stripped) or re.match(r'^\d+\.\s+', stripped):
+                # Determine indent level by leading spaces
+                leading_spaces = len(line) - len(line.lstrip())
+                indent_level = leading_spaces // 2
+                
+                # Extract bullet content
+                if re.match(r'^[-*]\s+', stripped):
+                    content = re.sub(r'^[-*]\s+', '', stripped)
+                    style = 'List Bullet'
+                    if indent_level > 0:
+                        style = 'List Bullet 2' if indent_level == 1 else 'List Bullet 3'
+                else:
+                    content = re.sub(r'^\d+\.\s+', '', stripped)
+                    style = 'List Number'
+                    if indent_level > 0:
+                        style = 'List Number 2' if indent_level == 1 else 'List Number 3'
+                
+                # Add bullet with formatting
+                try:
+                    para = doc.add_paragraph(style=style)
+                except:
+                    para = doc.add_paragraph(style='List Bullet')
+                self._add_formatted_text(para, content)
+                in_list = True
+            
+            # Horizontal rule
+            elif stripped in ['---', '***', '___']:
+                doc.add_paragraph('─' * 50)
+            
+            # Regular paragraph
+            else:
+                para = doc.add_paragraph()
+                self._add_formatted_text(para, stripped)
+                in_list = False
+            
+            i += 1
+    
+    def _add_formatted_text(self, paragraph, text: str):
+        """Add text to paragraph with bold, italic, and other markdown formatting."""
+        import re
+        from docx.shared import Pt, RGBColor
+        
+        # Pattern to find **bold**, *italic*, `code`, and ***bold italic***
+        pattern = r'(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)'
+        
+        parts = re.split(pattern, text)
+        
+        for part in parts:
+            if not part:
+                continue
+            
+            # Bold italic (***text***)
+            if part.startswith('***') and part.endswith('***'):
+                run = paragraph.add_run(part[3:-3])
+                run.bold = True
+                run.italic = True
+            # Bold (**text**)
+            elif part.startswith('**') and part.endswith('**'):
+                run = paragraph.add_run(part[2:-2])
+                run.bold = True
+            # Italic (*text*)
+            elif part.startswith('*') and part.endswith('*'):
+                run = paragraph.add_run(part[1:-1])
+                run.italic = True
+            # Code (`text`)
+            elif part.startswith('`') and part.endswith('`'):
+                run = paragraph.add_run(part[1:-1])
+                run.font.name = 'Consolas'
+                run.font.size = Pt(10)
+                run.font.color.rgb = RGBColor(0x64, 0x64, 0x64)
+            # Regular text
+            else:
+                paragraph.add_run(part)
     
     def save_to_text(self, report_text: str, filename: str) -> Path:
         """Save report to text file."""

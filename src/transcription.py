@@ -270,13 +270,20 @@ class TranscriptionService:
         )
 
     def fetch_captions(self, video_id: str, languages=['ko', 'en']) -> Optional[str]:
-        """Fetch existing captions from YouTube."""
+        """Fetch existing captions from YouTube.
+        
+        Uses YouTube's auto-generated or manual captions when available,
+        which is faster and cheaper than Whisper transcription.
+        """
         try:
             from youtube_transcript_api import YouTubeTranscriptApi
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
             
-            # Combine text parts
-            full_text = " ".join([t['text'] for t in transcript_list])
+            # New API requires instantiation
+            api = YouTubeTranscriptApi()
+            transcript_data = api.fetch(video_id, languages=languages)
+            
+            # Combine text parts (now FetchedTranscriptSnippet objects)
+            full_text = " ".join([segment.text for segment in transcript_data])
             return full_text
         except Exception as e:
             # print(f"Could not fetch captions for {video_id}: {e}")
