@@ -49,10 +49,21 @@ def init_db():
             videos_found INTEGER,
             comments_collected INTEGER,
             videos_analyzed INTEGER,
+            videos_transcribed INTEGER DEFAULT 0,
+            progress_message TEXT,
             error TEXT,
             report_filename TEXT
         )
     """)
+    # Add new columns if they don't exist (for existing databases)
+    try:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN videos_transcribed INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN progress_message TEXT")
+    except:
+        pass
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,6 +144,8 @@ class JobStatus(BaseModel):
     videos_found: int
     comments_collected: int
     videos_analyzed: int
+    videos_transcribed: int = 0
+    progress_message: Optional[str] = None
     error: Optional[str]
     report_filename: Optional[str]
 
@@ -157,6 +170,18 @@ PREDEFINED_MODELS = {
     "sorento": SORENTO_CONFIG,
     "santafe": SANTAFE_CONFIG,
 }
+
+
+def update_transcription_progress(job_id: str, transcribed: int, total: int, message: str):
+    """Update transcription progress in database."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE jobs SET videos_transcribed = ?, progress_message = ? WHERE id = ?",
+        (transcribed, f"{message} ({transcribed}/{total})", job_id)
+    )
+    conn.commit()
+    conn.close()
 
 
 def run_analysis_job(
@@ -238,10 +263,35 @@ def run_analysis_job(
         
         # Run transcription if enabled, OR fetch captions if use_existing_subtitles is enabled
         if not skip_transcription:
-            pipeline.run_transcription(car_model, max_videos=max_videos)
+            cursor.execute(
+                "UPDATE jobs SET progress_message = ? WHERE id = ?",
+                (f"Transcribing videos with Whisper (this may take several minutes per video)...", job_id)
+            )
+            conn.commit()
+            pipeline.run_transcription(
+                car_model, 
+                max_videos=max_videos,
+                progress_callback=lambda transcribed, total, msg: update_transcription_progress(job_id, transcribed, total, msg)
+            )
         elif use_existing_subtitles:
+            cursor.execute(
+                "UPDATE jobs SET progress_message = ? WHERE id = ?",
+                ("Fetching YouTube captions...", job_id)
+            )
+            conn.commit()
             # Only fetch existing captions, don't use Whisper
-            pipeline.run_caption_fetch_only(car_model, max_videos=max_videos)
+            pipeline.run_caption_fetch_only(
+                car_model, 
+                max_videos=max_videos,
+                progress_callback=lambda transcribed, total, msg: update_transcription_progress(job_id, transcribed, total, msg)
+            )
+        
+        # Update progress for analysis stage
+        cursor.execute(
+            "UPDATE jobs SET progress_message = ? WHERE id = ?",
+            ("Running AI analysis on transcripts and comments...", job_id)
+        )
+        conn.commit()
         
         # Run analysis
         video_analyses, comment_analyses = pipeline.run_analysis(car_model)
@@ -498,6 +548,10 @@ async def get_job(job_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
     
+    # Handle new columns that might not exist in older databases
+    videos_transcribed = row["videos_transcribed"] if "videos_transcribed" in row.keys() else 0
+    progress_message = row["progress_message"] if "progress_message" in row.keys() else None
+    
     return JobStatus(
         id=row["id"],
         car_company=row["car_company"],
@@ -509,6 +563,8 @@ async def get_job(job_id: str):
         videos_found=row["videos_found"] or 0,
         comments_collected=row["comments_collected"] or 0,
         videos_analyzed=row["videos_analyzed"] or 0,
+        videos_transcribed=videos_transcribed or 0,
+        progress_message=progress_message,
         error=row["error"],
         report_filename=row["report_filename"]
     )

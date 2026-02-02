@@ -83,7 +83,8 @@ class YouTubeAnalysisPipeline:
         car_model: CarModel,
         video_urls: Optional[List[str]] = None,
         max_videos: int = 20,
-        whisper_model: str = "large-v3"
+        whisper_model: str = "large-v3",
+        progress_callback: Optional[callable] = None
     ) -> Dict[str, str]:
         """
         Stage 3: Transcribe video audio.
@@ -93,6 +94,7 @@ class YouTubeAnalysisPipeline:
             video_urls: Specific URLs to transcribe (uses discovered videos if None)
             max_videos: Maximum number of videos to transcribe
             whisper_model: Whisper model size
+            progress_callback: Optional callback(transcribed_count, total, message)
             
         Returns:
             Dictionary mapping URLs to transcriptions
@@ -115,7 +117,10 @@ class YouTubeAnalysisPipeline:
             cleanup_audio=True
         )
         
-        transcriptions = transcription_service.transcribe_videos(video_urls)
+        transcriptions = transcription_service.transcribe_videos(
+            video_urls,
+            progress_callback=progress_callback
+        )
         
         # Store results
         if model_id not in self.results:
@@ -127,7 +132,8 @@ class YouTubeAnalysisPipeline:
     def run_caption_fetch_only(
         self, 
         car_model: CarModel,
-        max_videos: int = 20
+        max_videos: int = 20,
+        progress_callback: Optional[callable] = None
     ) -> Dict[str, str]:
         """
         Fetch existing YouTube captions without using Whisper.
@@ -136,6 +142,7 @@ class YouTubeAnalysisPipeline:
         Args:
             car_model: Car model being analyzed
             max_videos: Maximum number of videos to fetch captions for
+            progress_callback: Optional callback(fetched_count, total, message)
             
         Returns:
             Dictionary mapping URLs to caption text
@@ -160,10 +167,15 @@ class YouTubeAnalysisPipeline:
         )
         
         captions = {}
+        total = len(video_urls)
         from tqdm import tqdm
-        with tqdm(total=len(video_urls), desc="Fetching captions", unit="video") as pbar:
-            for url in video_urls:
+        with tqdm(total=total, desc="Fetching captions", unit="video") as pbar:
+            for i, url in enumerate(video_urls):
                 video_id = url.split("v=")[-1]
+                
+                if progress_callback:
+                    progress_callback(i, total, f"Fetching captions for {video_id}")
+                
                 caption_text = transcription_service.fetch_captions(video_id)
                 if caption_text:
                     captions[url] = caption_text
@@ -172,7 +184,10 @@ class YouTubeAnalysisPipeline:
                     print(f"✗ No captions for {video_id}")
                 pbar.update(1)
         
-        print(f"\nFound captions for {len(captions)}/{len(video_urls)} videos")
+        if progress_callback:
+            progress_callback(total, total, f"Caption fetch complete")
+        
+        print(f"\nFound captions for {len(captions)}/{total} videos")
         
         # Store results
         if model_id not in self.results:

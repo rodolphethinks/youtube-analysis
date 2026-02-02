@@ -13,6 +13,8 @@ export interface Job {
   videos_found: number;
   comments_collected: number;
   videos_analyzed: number;
+  videos_transcribed: number;
+  progress_message: string | null;
   error: string | null;
   report_filename: string | null;
 }

@@ -231,9 +231,21 @@ export default function JobDetail() {
           <div className="relative z-10">
             <Loader2 className="w-12 h-12 animate-spin text-white mx-auto" />
             <h3 className="text-xl font-semibold text-white mt-4">Analysis in Progress</h3>
-            <p className="text-white/70 mt-2">
-              Processing videos, extracting insights, and generating reports...
-            </p>
+            {job.progress_message ? (
+              <p className="text-white/90 mt-2 font-medium">
+                {job.progress_message}
+              </p>
+            ) : (
+              <p className="text-white/70 mt-2">
+                Processing videos, extracting insights, and generating reports...
+              </p>
+            )}
+            {job.videos_transcribed > 0 && (
+              <div className="mt-3 bg-white/20 rounded-lg px-4 py-2 inline-block">
+                <span className="text-white font-semibold">{job.videos_transcribed}</span>
+                <span className="text-white/70 ml-1">videos transcribed</span>
+              </div>
+            )}
             <div className="flex items-center justify-center gap-2 mt-4 text-sm text-white/60">
               <RefreshCw size={14} className="animate-spin" />
               Auto-refreshing every 3 seconds

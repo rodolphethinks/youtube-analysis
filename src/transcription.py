@@ -169,7 +169,8 @@ class TranscriptionService:
     def transcribe_videos(
         self, 
         video_urls: List[str],
-        max_retries: int = 2
+        max_retries: int = 2,
+        progress_callback: Optional[callable] = None
     ) -> Dict[str, str]:
         """
         Transcribe multiple videos.
@@ -177,22 +178,34 @@ class TranscriptionService:
         Args:
             video_urls: List of YouTube video URLs
             max_retries: Number of retry attempts on failure
+            progress_callback: Optional callback(transcribed_count, total, message)
             
         Returns:
             Dictionary mapping video URLs to transcriptions.
         """
         transcriptions = {}
+        total = len(video_urls)
         
-        with tqdm(total=len(video_urls), desc="Transcribing videos", unit="video") as pbar:
-            for url in video_urls:
+        with tqdm(total=total, desc="Transcribing videos", unit="video") as pbar:
+            for i, url in enumerate(video_urls):
+                video_id = url.split("v=")[-1]
+                
+                if progress_callback:
+                    progress_callback(i, total, f"Transcribing video {video_id}")
+                
+                print(f"\n[{i+1}/{total}] Processing {video_id}...")
                 result = self._transcribe_single(url, max_retries)
                 if result.success:
                     transcriptions[url] = result.transcript
+                    print(f"✓ Successfully transcribed {video_id}")
                 else:
-                    print(f"Failed to transcribe {url}: {result.error_message}")
+                    print(f"✗ Failed to transcribe {url}: {result.error_message}")
                 pbar.update(1)
         
-        print(f"Successfully transcribed {len(transcriptions)}/{len(video_urls)} videos")
+        if progress_callback:
+            progress_callback(total, total, "Transcription complete")
+        
+        print(f"Successfully transcribed {len(transcriptions)}/{total} videos")
         return transcriptions
     
     def _transcribe_single(
