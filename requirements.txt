@@ -21,6 +21,8 @@ yt-dlp>=2024.1.0
 # Audio transcription (Whisper)
 transformers>=4.36.0
 torch>=2.0.0
+accelerate>=0.25.0
+librosa>=0.10.0
 
 # Report generation
 python-docx>=1.0.0

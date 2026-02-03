@@ -73,80 +73,126 @@ class AudioDownloader:
 class WhisperTranscriber:
     """Transcribe audio using OpenAI Whisper model."""
     
-    def __init__(self, model_size: str = "large-v3", device: str = "auto"):
+    def __init__(self, model_size: str = "large-v3-turbo", device: str = "auto"):
         """
         Initialize Whisper transcriber.
         
         Args:
-            model_size: Whisper model size (tiny, base, small, medium, large-v3)
+            model_size: Whisper model size (tiny, base, small, medium, large-v3, large-v3-turbo)
             device: Device to use (auto, cuda, cpu)
         """
         self.model_size = model_size
         self.device = device
-        self._pipeline = None
+        self._model = None
+        self._processor = None
+        self._torch_dtype = None
     
-    @property
-    def pipeline(self):
-        """Lazy loading of Whisper pipeline."""
-        if self._pipeline is None:
-            self._pipeline = self._load_pipeline()
-        return self._pipeline
-    
-    def _load_pipeline(self):
-        """Load the Whisper model and create pipeline."""
+    def _load_model(self):
+        """Load the Whisper model and processor directly."""
         import torch
-        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
         
         if self.device == "auto":
-            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            self._device = "cuda:0" if torch.cuda.is_available() else "cpu"
         else:
-            device = self.device
+            self._device = self.device
         
-        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        self._torch_dtype = torch.float16 if "cuda" in self._device else torch.float32
         
         model_id = f"openai/whisper-{self.model_size}"
         
-        print(f"Loading Whisper model: {model_id} on {device}")
+        print(f"Loading Whisper model: {model_id} on {self._device}")
+        print(f"Using torch dtype: {self._torch_dtype}")
         
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        # Load model with SDPA for faster attention
+        self._model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id,
-            torch_dtype=torch_dtype,
+            torch_dtype=self._torch_dtype,
             low_cpu_mem_usage=True,
-            use_safetensors=True
+            use_safetensors=True,
+            attn_implementation="sdpa"
         )
-        model.to(device)
+        self._model.to(self._device)
         
-        processor = AutoProcessor.from_pretrained(model_id)
+        self._processor = AutoProcessor.from_pretrained(model_id)
         
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            torch_dtype=torch_dtype,
-            device=device,
-            return_timestamps=True
-        )
-        
-        return pipe
+        print(f"Model loaded successfully on {self._device}")
+    
+    @property
+    def model(self):
+        """Lazy loading of model."""
+        if self._model is None:
+            self._load_model()
+        return self._model
+    
+    @property
+    def processor(self):
+        """Lazy loading of processor."""
+        if self._processor is None:
+            self._load_model()
+        return self._processor
     
     def transcribe(self, audio_path: str, language: str = "korean") -> Optional[str]:
         """
-        Transcribe audio file.
+        Transcribe audio file using Whisper's native long-form transcription.
         
         Args:
             audio_path: Path to audio file
-            language: Language for transcription
+            language: Language for transcription (e.g., 'korean', 'english')
             
         Returns:
             Transcription text or None on failure.
         """
+        import torch
+        import librosa
+        
         try:
-            result = self.pipeline(
-                audio_path,
-                generate_kwargs={"language": language}
+            # Load audio with librosa (resamples to 16kHz as required by Whisper)
+            audio, sr = librosa.load(audio_path, sr=16000)
+            
+            # Process audio to get input features
+            inputs = self.processor(
+                audio,
+                sampling_rate=16000,
+                return_tensors="pt",
+                return_attention_mask=True
             )
-            return result.get("text", "")
+            
+            # Move to device with correct dtype
+            input_features = inputs.input_features.to(self._device, dtype=self._torch_dtype)
+            attention_mask = inputs.attention_mask.to(self._device) if inputs.attention_mask is not None else None
+            
+            # Map language name to Whisper language code
+            language_map = {
+                "korean": "ko",
+                "english": "en",
+                "japanese": "ja",
+                "chinese": "zh",
+                "french": "fr",
+                "german": "de",
+                "spanish": "es",
+            }
+            lang_code = language_map.get(language.lower(), language.lower()[:2])
+            
+            # Generate transcription using Whisper's native long-form mechanism
+            # This handles chunking internally (see Whisper paper section 3.8)
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    input_features=input_features,
+                    attention_mask=attention_mask,
+                    language=lang_code,
+                    task="transcribe",
+                    return_timestamps=False,  # Faster without timestamps
+                )
+            
+            # Decode the generated tokens
+            transcription = self.processor.batch_decode(
+                generated_ids, 
+                skip_special_tokens=True
+            )[0]
+            
+            return transcription.strip()
+            
         except Exception as e:
             print(f"Error transcribing {audio_path}: {e}")
             return None

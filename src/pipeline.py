@@ -83,7 +83,7 @@ class YouTubeAnalysisPipeline:
         car_model: CarModel,
         video_urls: Optional[List[str]] = None,
         max_videos: int = 20,
-        whisper_model: str = "large-v3",
+        whisper_model: str = "large-v3-turbo",
         progress_callback: Optional[callable] = None
     ) -> Dict[str, str]:
         """
