@@ -43,6 +43,7 @@ def init_db():
             car_company TEXT,
             car_model TEXT,
             search_query TEXT,
+            research_focus TEXT,
             status TEXT,
             created_at TEXT,
             completed_at TEXT,
@@ -62,6 +63,10 @@ def init_db():
         pass
     try:
         cursor.execute("ALTER TABLE jobs ADD COLUMN progress_message TEXT")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN research_focus TEXT")
     except:
         pass
     cursor.execute("""
@@ -115,6 +120,7 @@ class CarModelRequest(BaseModel):
     company: str = Field(..., example="르노")
     model: str = Field(..., example="Scenic E-Tech")
     search_queries: Optional[List[str]] = Field(None, example=["르노 세닉 리뷰", "세닉 전기차"])
+    research_focus: Optional[str] = Field(None, description="Custom research topics/questions to focus analysis on")
     skip_transcription: bool = Field(True, description="Skip audio transcription for faster analysis")
     max_videos: int = Field(20, ge=1, le=200)
     date_from: Optional[str] = Field(None, example="2024-01-01")
@@ -125,6 +131,7 @@ class CarModelRequest(BaseModel):
 
 class PredefinedModelRequest(BaseModel):
     model_key: str = Field(..., example="scenic")
+    research_focus: Optional[str] = None
     skip_transcription: bool = True
     max_videos: int = 20
     date_from: Optional[str] = None
@@ -138,6 +145,7 @@ class JobStatus(BaseModel):
     car_company: str
     car_model: str
     search_query: str = ""
+    research_focus: Optional[str] = None
     status: str
     created_at: str
     completed_at: Optional[str]
@@ -189,6 +197,7 @@ def run_analysis_job(
     car_model: CarModel, 
     skip_transcription: bool, 
     max_videos: int,
+    research_focus: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     region_code: Optional[str] = None,
@@ -425,6 +434,7 @@ async def analyze_predefined(request: PredefinedModelRequest, background_tasks: 
         request.skip_transcription, 
         request.max_videos, 
         background_tasks,
+        research_focus=request.research_focus,
         date_from=request.date_from,
         date_to=request.date_to,
         region_code=request.region_code,
@@ -438,13 +448,15 @@ async def analyze_custom(request: CarModelRequest, background_tasks: BackgroundT
     car_model = CarModel(
         company=request.company,
         model=request.model,
-        search_queries=request.search_queries or []
+        search_queries=request.search_queries or [],
+        research_focus=request.research_focus
     )
     return await _create_job(
         car_model, 
         request.skip_transcription, 
         request.max_videos, 
         background_tasks,
+        research_focus=request.research_focus,
         date_from=request.date_from,
         date_to=request.date_to,
         region_code=request.region_code,
@@ -457,6 +469,7 @@ async def _create_job(
     skip_transcription: bool, 
     max_videos: int, 
     background_tasks: BackgroundTasks,
+    research_focus: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     region_code: Optional[str] = None,
@@ -469,10 +482,10 @@ async def _create_job(
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO jobs (id, car_company, car_model, search_query, status, created_at, videos_found, 
+        INSERT INTO jobs (id, car_company, car_model, search_query, research_focus, status, created_at, videos_found, 
             comments_collected, videos_analyzed, report_filename)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (job_id, car_model.company, car_model.model, search_query, "pending", 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (job_id, car_model.company, car_model.model, search_query, research_focus, "pending", 
           datetime.now().isoformat(), 0, 0, 0, None))
     conn.commit()
     conn.close()
@@ -484,6 +497,7 @@ async def _create_job(
         car_model, 
         skip_transcription, 
         max_videos,
+        research_focus,
         date_from,
         date_to,
         region_code,
@@ -495,6 +509,7 @@ async def _create_job(
         car_company=car_model.company,
         car_model=car_model.model,
         search_query=search_query,
+        research_focus=research_focus,
         status="pending",
         created_at=datetime.now().isoformat(),
         completed_at=None,

@@ -38,6 +38,7 @@ export default function NewAnalysis() {
   const [customCompany, setCustomCompany] = useState('');
   const [customModel, setCustomModel] = useState('');
   const [customQueries, setCustomQueries] = useState('');
+  const [researchFocus, setResearchFocus] = useState('');
   const [skipTranscription, setSkipTranscription] = useState(true);
   const [maxVideos, setMaxVideos] = useState(20);
   const [dateFrom, setDateFrom] = useState('');
@@ -87,6 +88,7 @@ export default function NewAnalysis() {
           selectedModel, 
           skipTranscription, 
           maxVideos,
+          researchFocus || null,
           dateFrom || null,
           dateTo || null,
           regionCode || null,
@@ -102,6 +104,7 @@ export default function NewAnalysis() {
           queries, 
           skipTranscription, 
           maxVideos,
+          researchFocus || null,
           dateFrom || null,
           dateTo || null,
           regionCode || null,
@@ -291,6 +294,26 @@ export default function NewAnalysis() {
               </div>
             </div>
           )}
+
+          {/* Research Focus */}
+          <div className="mt-6 pt-6 border-t border-gray-100">
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
+                <Search size={16} className="text-primary-500" />
+                Research Focus (Optional)
+              </label>
+              <p className="text-xs text-gray-500 mb-3">
+                Specify specific topics or questions you want the AI to focus on. Leave blank for general analysis.
+              </p>
+              <textarea
+                value={researchFocus}
+                onChange={(e) => setResearchFocus(e.target.value)}
+                rows={4}
+                placeholder={"Example:\n\u2022 After-sales service experience (including mobile service)\n\u2022 Perception of the limited showroom/service network\n\u2022 Customer feedback on delivery process"}
+                className="w-full px-4 py-3 bg-white border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 placeholder:text-gray-400"
+              />
+            </div>
+          </div>
 
           {/* Options */}
           <div className="mt-8 pt-6 border-t border-gray-100">

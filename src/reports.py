@@ -47,10 +47,26 @@ class ReportGenerator:
             for col in columns if col in analysis_df.columns
         }
         
+        # Add research focus section if provided
+        research_section = ""
+        custom_analysis_requirement = ""
+        if car_model.research_focus:
+            research_section = f'''
+
+CUSTOM RESEARCH OBJECTIVES:
+This analysis was specifically commissioned to address the following research questions:
+{car_model.research_focus}
+
+'''
+            custom_analysis_requirement = f'''
+
+CRITICAL: Structure your report to directly address the research objectives above. Add dedicated sections for each research topic where relevant data was found. If specific research questions cannot be answered from the data, explicitly state this.
+'''
+        
         prompt = f'''You are an expert automotive market analyst. Given the following data extracted from YouTube video reviews about the {car_model.company} {car_model.model}, provide a comprehensive analysis report.
-
+{research_section}
 Identify the most common themes, significant insights, and key takeaways for each aspect.
-
+{custom_analysis_requirement}
 Data:
 {json.dumps(extracted_data, indent=2, ensure_ascii=False)}
 
@@ -58,6 +74,7 @@ Provide the analysis in the following structured format:
 
 ## Executive Summary
 [2-3 sentence overview of the overall reception]
+{f"[Include how findings relate to the research objectives]" if car_model.research_focus else ""}
 
 ## Overall Sentiment Analysis
 - Distribution of positive/neutral/negative reviews
@@ -83,10 +100,16 @@ Provide the analysis in the following structured format:
 - Battery performance feedback
 - Noise level observations
 - Other technical notes
+{"" if not car_model.research_focus else """
+
+## Research Focus Findings
+[Dedicated section addressing each research objective with specific findings]
+"""}
 
 ## Recommendations
 - For potential buyers
 - For the manufacturer
+{"- For researchers based on the research objectives" if car_model.research_focus else ""}
 
 ## Conclusion
 [Final summary and outlook]

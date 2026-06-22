@@ -7,6 +7,7 @@ export interface Job {
   car_company: string;
   car_model: string;
   search_query: string;
+  research_focus: string | null;
   status: 'pending' | 'running' | 'completed' | 'failed';
   created_at: string;
   completed_at: string | null;
@@ -61,6 +62,7 @@ export const api = {
     modelKey: string,
     skipTranscription: boolean = true,
     maxVideos: number = 20,
+    researchFocus?: string | null,
     dateFrom?: string | null,
     dateTo?: string | null,
     regionCode?: string | null,
@@ -70,6 +72,7 @@ export const api = {
       model_key: modelKey,
       skip_transcription: skipTranscription,
       max_videos: maxVideos,
+      research_focus: researchFocus,
       date_from: dateFrom,
       date_to: dateTo,
       region_code: regionCode,
@@ -85,6 +88,7 @@ export const api = {
     queries: string[] | null,
     skipTranscription: boolean = true,
     maxVideos: number = 20,
+    researchFocus?: string | null,
     dateFrom?: string | null,
     dateTo?: string | null,
     regionCode?: string | null,
@@ -96,6 +100,7 @@ export const api = {
       search_queries: queries,
       skip_transcription: skipTranscription,
       max_videos: maxVideos,
+      research_focus: researchFocus,
       date_from: dateFrom,
       date_to: dateTo,
       region_code: regionCode,

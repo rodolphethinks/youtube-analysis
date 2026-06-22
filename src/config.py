@@ -15,6 +15,7 @@ class CarModel:
     company: str
     model: str
     search_queries: List[str] = field(default_factory=list)
+    research_focus: Optional[str] = None  # Custom research topics/questions
     
     def __post_init__(self):
         if not self.search_queries:

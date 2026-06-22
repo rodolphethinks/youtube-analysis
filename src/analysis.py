@@ -95,7 +95,21 @@ class VideoAnalyzer:
     
     def _build_analysis_prompt(self, car_model: "CarModel") -> str:
         """Build the analysis instruction prompt."""
-        return f'''Analyze the following transcript of a YouTube video discussing the {car_model.company} {car_model.model}. Write everything in English.
+        
+        # Add research focus section if provided
+        research_section = ""
+        if car_model.research_focus:
+            research_section = f'''
+CUSTOM RESEARCH FOCUS:
+The analysis should specifically address the following research topics:
+{car_model.research_focus}
+
+Please pay special attention to these areas and provide detailed insights where relevant.
+---
+
+'''
+        
+        return f'''{research_section}Analyze the following transcript of a YouTube video discussing the {car_model.company} {car_model.model}. Write everything in English.
 Do not make any comments that are unrelated to the video to introduce the task.
 Your goal is only to extract key insights and classify the content based on the following criteria:
 
@@ -233,7 +247,21 @@ class CommentAnalyzer:
     
     def _build_comment_prompt(self, car_model: "CarModel") -> str:
         """Build the comment analysis instruction prompt."""
-        return f'''You are an AI trained in natural language processing, sentiment analysis, and user profiling.
+        
+        # Add research focus section if provided
+        research_section = ""
+        if car_model.research_focus:
+            research_section = f'''
+CUSTOM RESEARCH FOCUS:
+When analyzing comments, pay special attention to the following research topics:
+{car_model.research_focus}
+
+Extract insights specifically related to these areas and highlight them in the themes and recurring topics.
+---
+
+'''
+        
+        return f'''{research_section}You are an AI trained in natural language processing, sentiment analysis, and user profiling.
 Your task is to analyze YouTube comments and extract meaningful insights to build detailed customer/user profiles.
 The YouTube video should be about the {car_model.company} {car_model.model}.
 
