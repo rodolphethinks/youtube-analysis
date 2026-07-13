@@ -47,55 +47,57 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def refetch_transcript_arguments(
+def refetch_audio_arguments(
     client,
-    transcript_api,
     car_key: str,
     car_name: str,
 ) -> list[dict]:
     """
-    Load videos CSV, re-fetch transcripts with cookies, extract arguments via Gemini.
-    Returns list of argument dicts (source_type == "transcript").
+    Load videos CSV, download audio sequentially, extract arguments via Gemini in parallel.
+    Returns list of argument dicts (source_type == "audio").
     """
+    import math, threading
     vid_csv = A.OUTPUT_DIR / f"{car_key}_videos.csv"
     if not vid_csv.exists():
         log.error(f"Missing: {vid_csv}")
         return []
 
     videos_df = pd.read_csv(vid_csv, encoding="utf-8-sig")
-    log.info(f"{car_name}: {len(videos_df)} videos loaded from {vid_csv.name}")
+    total = len(videos_df)
+    log.info(f"{car_name}: {total} videos — downloading audio sequentially then extracting")
 
-    # Re-fetch transcripts
-    video_data = []
-    for _, row in videos_df.iterrows():
-        vid_id = str(row["video_id"])
-        transcript = A.fetch_transcript(vid_id, transcript_api)
-        has = "✓" if transcript else "✗"
-        log.info(f"  [{has}] {str(row['title'])[:65]}")
-        video_data.append({
-            "video_id": vid_id,
-            "url": row["url"],
-            "title": row["title"],
+    # Phase 1: sequential audio download
+    audio_dir = A.OUTPUT_DIR / f"{car_key}_audio"
+    audio_dir.mkdir(exist_ok=True)
+    video_list = []
+    for i, (_, row) in enumerate(videos_df.iterrows()):
+        url = row["url"]
+        result = A._download_audio(url, str(audio_dir))
+        if result:
+            audio_path, mime = result
+            log.info(f"  [{i+1}/{total} ✓] {str(row['title'])[:65]}")
+        else:
+            audio_path, mime = "", "audio/mp4"
+            log.info(f"  [{i+1}/{total} ✗] {str(row['title'])[:65]}")
+        video_list.append({
+            "url": url, "title": row["title"],
             "video_rank": float(row["video_rank"]),
-            "transcript": transcript,
+            "audio_path": audio_path, "audio_mime": mime,
         })
-        import time; time.sleep(1.5)  # avoid IP rate-limiting
+        import time; time.sleep(A.AUDIO_DOWNLOAD_DELAY)
 
-    n_with = sum(1 for v in video_data if v["transcript"])
-    log.info(f"{car_name}: {n_with}/{len(video_data)} transcripts retrieved")
-
-    # Extract arguments in parallel
+    # Phase 2: parallel Gemini extraction
     results: list[dict] = []
-    import threading
     _lock = threading.Lock()
     done = 0
-    jobs = [v for v in video_data if v["transcript"]]
+    jobs = [v for v in video_list if v["audio_path"]]
+    log.info(f"{car_name}: {len(jobs)}/{total} audio files ready — extracting with Gemini")
 
     with ThreadPoolExecutor(max_workers=A.GEMINI_WORKERS) as executor:
         futures = {
             executor.submit(
                 A.extract_transcript_arguments,
-                client, v["url"], v["title"], v["transcript"], car_name,
+                client, v["url"], v["title"], v["audio_path"], car_name, v["audio_mime"],
             ): v
             for v in jobs
         }
@@ -104,7 +106,8 @@ def refetch_transcript_arguments(
             try:
                 args = f.result()
                 for arg in args:
-                    arg["rank"] = v["video_rank"]
+                    mc = arg.pop("mention_count", 1)
+                    arg["rank"] = v["video_rank"] * math.log(1 + mc)
                 with _lock:
                     results.extend(args)
                     done += 1
@@ -114,11 +117,11 @@ def refetch_transcript_arguments(
                     for c in A.CATEGORIES
                     if any(a['category']==c for a in args)
                 )
-                log.info(f"  [transcript {n}/{len(jobs)}] {str(v['title'])[:55]} → {counts or 'no args'}")
+                log.info(f"  [audio {n}/{len(jobs)}] {str(v['title'])[:55]} → {counts or 'no args'}")
             except Exception as e:
                 log.warning(f"  Extraction error ({v['url']}): {e}")
 
-    log.info(f"{car_name}: {len(results)} transcript arguments extracted")
+    log.info(f"{car_name}: {len(results)} audio arguments extracted")
     return results
 
 
@@ -140,7 +143,6 @@ def main() -> None:
     log.info("=" * 60)
 
     client = A.init_gemini(A.GOOGLE_API_KEY)
-    transcript_api = A.build_transcript_api()
 
     # Load video/comment counts for report header
     video_counts: dict[str, int] = {}
@@ -156,14 +158,14 @@ def main() -> None:
     for car_key, car_name in A.CAR_NAMES.items():
         log.info(f"\n{'=' * 60}\n{car_name}\n{'=' * 60}")
 
-        # Step 1+2+3: re-fetch transcripts and extract arguments
-        transcript_args = refetch_transcript_arguments(client, transcript_api, car_key, car_name)
+        # Extract audio arguments for all videos, load existing comment arguments
+        audio_args = refetch_audio_arguments(client, car_key, car_name)
 
         # Step 4: load existing comment arguments
         comment_args = load_comment_arguments(car_key)
 
         # Combine and save
-        all_args = transcript_args + comment_args
+        all_args = audio_args + comment_args
         if all_args:
             pd.DataFrame(all_args).to_csv(
                 A.OUTPUT_DIR / f"{car_key}_raw_arguments.csv", index=False, encoding="utf-8-sig"

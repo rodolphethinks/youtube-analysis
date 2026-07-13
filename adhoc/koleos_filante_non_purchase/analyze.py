@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import re
+import tempfile
 import pandas as pd
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
@@ -36,8 +38,7 @@ from googleapiclient.errors import HttpError
 from google import genai
 from google.genai import types as genai_types
 from pydantic import BaseModel, Field
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import WebshareProxyConfig, GenericProxyConfig
+import yt_dlp
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -233,54 +234,53 @@ def fetch_comments(yt, video_id: str, max_comments: int = MAX_COMMENTS) -> list[
     return comments[:max_comments]
 
 
-def build_transcript_api() -> YouTubeTranscriptApi:
+def build_transcript_api() -> None:
+    """No-op — kept for API compatibility. Audio is now fetched via yt_dlp in extract_transcript_arguments."""
+    return None
+
+
+_AUDIO_MIME: dict[str, str] = {
+    "m4a": "audio/mp4", "mp4": "audio/mp4",
+    "webm": "audio/webm", "opus": "audio/ogg",
+    "mp3": "audio/mpeg", "ogg": "audio/ogg",
+}
+
+
+def _download_audio(video_url: str, output_dir: str) -> Optional[tuple[str, str]]:
     """
-    Build a YouTubeTranscriptApi instance.
-    Priority:
-      1. Webshare residential proxy  (WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD in .env)
-      2. Generic HTTP proxy           (HTTP_PROXY / HTTPS_PROXY in .env)
-      3. No proxy (direct, likely blocked for many videos)
-    Note: cookie-based auth is broken in the current youtube-transcript-api library.
+    Download best audio (no ffmpeg needed) to output_dir.
+    Tries multiple yt_dlp player clients sequentially.
+    Returns (file_path, mime_type) or None on failure.
     """
-    ws_user = os.getenv("WEBSHARE_PROXY_USERNAME", "")
-    ws_pass = os.getenv("WEBSHARE_PROXY_PASSWORD", "")
-    if ws_user and ws_pass:
-        log.info("Transcript API: using Webshare residential proxy")
-        return YouTubeTranscriptApi(
-            proxy_config=WebshareProxyConfig(
-                proxy_username=ws_user,
-                proxy_password=ws_pass,
-            )
-        )
+    proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or None
+    cookies_path = str(COOKIES_PATH) if COOKIES_PATH.exists() else None
+    # android* clients don't support cookies; web clients use cookies
+    android_clients = {"android", "android_vr", "android_embedded", "android_creator"}
 
-    http_proxy = os.getenv("HTTP_PROXY", "") or os.getenv("http_proxy", "")
-    https_proxy = os.getenv("HTTPS_PROXY", "") or os.getenv("https_proxy", "")
-    if http_proxy or https_proxy:
-        log.info(f"Transcript API: using generic proxy ({https_proxy or http_proxy})")
-        return YouTubeTranscriptApi(
-            proxy_config=GenericProxyConfig(
-                http_url=http_proxy or https_proxy,
-                https_url=https_proxy or http_proxy,
-            )
-        )
-
-    log.warning("Transcript API: no proxy configured — IpBlocked errors likely for many videos")
-    return YouTubeTranscriptApi()
-
-
-def fetch_transcript(video_id: str, api: YouTubeTranscriptApi) -> Optional[str]:
-    """Fetch captions via youtube-transcript-api. Korean preferred, English fallback."""
-    try:
-        data = api.fetch(video_id, languages=["ko", "en"])
-        return " ".join(seg.text for seg in data).strip()
-    except Exception as e:
-        err = type(e).__name__
-        # Only log unexpected errors — NoTranscriptFound / TranscriptsDisabled are normal
-        if err in ("IpBlocked", "RequestBlocked"):
-            log.info(f"Transcript blocked (IP rate-limited) for {video_id}")
-        elif err not in ("NoTranscriptFound", "TranscriptsDisabled", "VideoUnavailable"):
-            log.warning(f"Transcript fetch error [{err}] for {video_id}: {e}")
-        return None
+    for client_hint in [["android_vr"], ["android"], ["web"], ["ios"], ["tv_embedded"], ["mweb"]]:
+        ydl_opts: dict = {
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+            "outtmpl": os.path.join(output_dir, "%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "extractor_args": {"youtube": {"player_client": client_hint}},
+        }
+        if proxy:
+            ydl_opts["proxy"] = proxy
+        if cookies_path and client_hint[0] not in android_clients:
+            ydl_opts["cookiefile"] = cookies_path
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                vid_id = info.get("id", "")
+                ext = info.get("ext", "m4a")
+                path = os.path.join(output_dir, f"{vid_id}.{ext}")
+                if os.path.exists(path):
+                    return path, _AUDIO_MIME.get(ext, "audio/mpeg")
+        except Exception:
+            continue
+    log.warning(f"Audio download failed for all clients: {video_url}")
+    return None
 
 
 # ── Ranking ────────────────────────────────────────────────────────────────────
@@ -314,7 +314,8 @@ def comment_rank(video_rank: float, comment_likes: int) -> float:
 class ArgumentItem(BaseModel):
     category: str = Field(description="One of: non_purchase, competitor, regret")
     argument: str = Field(description="Concise English argument summary (max 20 words)")
-    quote: str = Field(description="Verbatim quote from transcript (Korean OK, max 60 words)")
+    quote: str = Field(description="Verbatim quote from audio (Korean OK, max 60 words)")
+    mention_count: int = Field(description="How many times this argument theme is mentioned in the audio (1 if only once)")
 
 class TranscriptArguments(BaseModel):
     arguments: list[ArgumentItem] = Field(default_factory=list)
@@ -347,13 +348,14 @@ def init_gemini(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def _gemini_call(client: genai.Client, prompt: str, schema: type) -> Optional[object]:
+def _gemini_call(client: genai.Client, prompt: str, schema: type, contents=None) -> Optional[object]:
     """Call Gemini with structured JSON output and exponential backoff retry."""
+    payload = contents if contents is not None else prompt
     for attempt in range(GEMINI_RETRY_ATTEMPTS):
         try:
             resp = client.models.generate_content(
                 model=GEMINI_MODEL,
-                contents=prompt,
+                contents=payload,
                 config=genai_types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=schema,
@@ -384,47 +386,75 @@ def parse_json(text: str) -> Optional[dict | list]:
 
 # ── Argument extraction: transcripts ──────────────────────────────────────────
 
+AUDIO_DOWNLOAD_DELAY = 2.0  # seconds between sequential audio downloads
+
+
 def extract_transcript_arguments(
     client: genai.Client,
     video_url: str,
     title: str,
-    transcript: str,
+    audio_path: str,    # pre-downloaded audio file path (empty string = skip)
     car_name: str,
+    mime_type: str = "audio/mp4",
 ) -> list[dict]:
     """
-    Ask Gemini to extract categorized arguments from a video transcript.
-    Returns list of {category, argument, quote, source_url, source_title, source_type}.
+    Upload a pre-downloaded audio file to Gemini Files API and extract arguments.
+    audio_path must exist. Returns [] if path is empty or upload fails.
     """
-    prompt = (
-        f"You are a Korean automotive market research analyst preparing a management briefing.\n\n"
-        f"Analyze the following YouTube video transcript about the {car_name}.\n\n"
-        f"Extract arguments in exactly these three categories:\n"
-        f'1. "non_purchase" – explicit reasons a consumer would NOT buy the {car_name} (criticisms, concerns, dealbreakers, unfavorable comparisons)\n'
-        f'2. "competitor" – reasons mentioned for choosing or preferring a competitor car over the {car_name}\n'
-        f'3. "regret" – reasons why someone who already bought the {car_name} might regret their purchase\n\n'
-        f"Rules:\n"
-        f"- Only extract arguments clearly stated or strongly implied in the transcript\n"
-        f"- Each argument must be a concise English sentence (max 20 words)\n"
-        f"- Each quote must be from the transcript text (keep original Korean; max 60 words)\n"
-        f"- Skip arguments that are purely positive or unrelated to the three categories\n\n"
-        f"Video title: {title}\n\n"
-        f"Transcript (first 8000 chars):\n{transcript[:8000]}"
-    )
-    result = _gemini_call(client, prompt, TranscriptArguments)
-    if not result:
+    if not audio_path or not os.path.exists(audio_path):
         return []
-    return [
-        {
-            "category": arg.category,
-            "argument": arg.argument,
-            "quote": arg.quote,
-            "source_url": video_url,
-            "source_title": title,
-            "source_type": "transcript",
-        }
-        for arg in result.arguments
-        if arg.category in CATEGORIES
-    ]
+
+    video_id = video_url.split("v=")[-1].split("&")[0]
+
+    try:
+        uploaded = client.files.upload(
+            file=audio_path,
+            config={"mime_type": mime_type},
+        )
+    except Exception as e:
+        log.warning(f"Gemini file upload error ({video_id}): {e}")
+        return []
+
+    try:
+        prompt = (
+            f"You are a Korean automotive market research analyst preparing a management briefing.\n\n"
+            f"Listen to this YouTube video about the {car_name} and extract negative arguments.\n\n"
+            f"Extract arguments in exactly these three categories:\n"
+            f'1. "non_purchase" – explicit reasons a consumer would NOT buy the {car_name}\n'
+            f'2. "competitor" – reasons to prefer a competitor car over the {car_name}\n'
+            f'3. "regret" – reasons why a buyer of the {car_name} might regret the purchase\n\n'
+            f"Rules:\n"
+            f"- Only include arguments clearly stated or strongly implied in the audio\n"
+            f"- argument: concise English sentence (max 20 words)\n"
+            f"- quote: verbatim phrase from the audio (Korean OK, max 60 words)\n"
+            f"- mention_count: how many times this theme appears in the audio\n"
+            f"- Sort by mention_count descending within each category\n"
+            f"- Skip purely positive or off-topic content\n\n"
+            f"Video title: {title}"
+        )
+        result = _gemini_call(client, prompt, TranscriptArguments, contents=[prompt, uploaded])
+        if not result:
+            return []
+        return [
+            {
+                "category": arg.category,
+                "argument": arg.argument,
+                "quote": arg.quote,
+                "mention_count": arg.mention_count,
+                "source_url": video_url,
+                "source_title": title,
+                "source_type": "audio",
+            }
+            for arg in result.arguments
+            if arg.category in CATEGORIES
+        ]
+    finally:
+        try:
+            client.files.delete(name=uploaded.name)
+        except Exception:
+            pass
+
+
 
 
 # ── Argument extraction: comments ─────────────────────────────────────────────
@@ -795,7 +825,6 @@ def build_docx_report(
 def main() -> None:
     yt = build_youtube(YOUTUBE_API_KEY)
     gemini = init_gemini(GOOGLE_API_KEY)
-    transcript_api = build_transcript_api()
 
     results_per_car: dict[str, dict[str, list]] = {}
     video_counts: dict[str, int] = {}
@@ -840,8 +869,8 @@ def main() -> None:
         videos_df.to_csv(OUTPUT_DIR / f"{car_key}_videos.csv", index=False, encoding="utf-8-sig")
         log.info(f"Videos with details: {len(videos_df)}")
 
-        # ── Step 3: Fetch transcripts + comments ───────────────────────────────
-        log.info("Step 3: Fetching transcripts and comments...")
+        # ── Step 3: Fetch comments ─────────────────────────────────────────────
+        log.info("Step 3: Fetching comments...")
         video_data: list[dict] = []
         total_qualifying_comments = 0
 
@@ -849,7 +878,6 @@ def main() -> None:
             vid_id = row["video_id"]
             v_rank = float(row["video_rank"])
 
-            transcript = fetch_transcript(vid_id, transcript_api)
             raw_comments = fetch_comments(yt, vid_id)
 
             # Filter + rank comments
@@ -865,29 +893,16 @@ def main() -> None:
                 "url": row["url"],
                 "title": row["title"],
                 "video_rank": v_rank,
-                "transcript": transcript,
                 "comments": qualifying,
             })
 
-            has_transcript = "✓" if transcript else "✗"
-            log.info(
-                f"  [{has_transcript} transcript | {len(qualifying)} comments] "
-                f"{row['title'][:60]}"
-            )
-            time.sleep(0.1)
+            log.info(f"  [{len(qualifying)} comments] {row['title'][:65]}")
+            time.sleep(0.2)
 
         comment_counts[car_key] = total_qualifying_comments
         log.info(f"Comments qualifying (≥{MIN_COMMENT_LIKES} likes): {total_qualifying_comments}")
 
-        # Save transcripts + comments to CSV immediately (crash safety)
-        transcript_rows = [
-            {"video_id": vd["video_id"], "url": vd["url"], "title": vd["title"],
-             "video_rank": vd["video_rank"], "transcript": vd["transcript"] or ""}
-            for vd in video_data
-        ]
-        pd.DataFrame(transcript_rows).to_csv(
-            OUTPUT_DIR / f"{car_key}_transcripts.csv", index=False, encoding="utf-8-sig"
-        )
+        # Save comments to CSV immediately (crash safety)
         comment_rows = [
             {**c, "video_title": vd["title"]}
             for vd in video_data for c in vd["comments"]
@@ -896,18 +911,32 @@ def main() -> None:
             pd.DataFrame(comment_rows).to_csv(
                 OUTPUT_DIR / f"{car_key}_comments.csv", index=False, encoding="utf-8-sig"
             )
-        log.info(f"Transcripts + comments saved to CSV.")
+        log.info(f"Comments saved to CSV.")
 
         # ── Step 4: Extract arguments in parallel ──────────────────────────────
-        n_transcripts = sum(1 for vd in video_data if vd["transcript"])
+        n_audio_videos = len(video_data)
         n_comment_videos = sum(1 for vd in video_data if vd["comments"])
         log.info(
-            f"Step 4: Extracting arguments with Gemini (parallelized, {GEMINI_WORKERS} workers)...\n"
-            f"  Transcript jobs: {n_transcripts} | Comment-batch jobs: {n_comment_videos}"
+            f"Step 4: Extracting arguments with Gemini ({GEMINI_WORKERS} workers)...\n"
+            f"  Audio jobs: {n_audio_videos} | Comment-batch jobs: {n_comment_videos}"
         )
 
+        # Phase 4a: sequential audio downloads (avoids hammering YouTube)
+        log.info("  Phase 4a: downloading audio sequentially...")
+        audio_dir = OUTPUT_DIR / f"{car_key}_audio"
+        audio_dir.mkdir(exist_ok=True)
+        for i, vd in enumerate(video_data):
+            result = _download_audio(vd["url"], str(audio_dir))
+            if result:
+                vd["audio_path"], vd["audio_mime"] = result
+                log.info(f"  [{i+1}/{n_audio_videos} ✓] {vd['title'][:65]}")
+            else:
+                vd["audio_path"], vd["audio_mime"] = "", "audio/mp4"
+                log.info(f"  [{i+1}/{n_audio_videos} ✗] {vd['title'][:65]}")
+            time.sleep(AUDIO_DOWNLOAD_DELAY)
+
         raw_arguments: dict[str, list[dict]] = {c: [] for c in CATEGORIES}
-        transcript_futures: dict = {}
+        audio_futures: dict = {}
         comment_futures: dict = {}
 
         import threading
@@ -915,14 +944,16 @@ def main() -> None:
         t_done = 0
         c_done = 0
 
+        # Phase 4b: parallel Gemini extraction (audio upload + comment batches)
+        log.info("  Phase 4b: parallel Gemini extraction...")
         with ThreadPoolExecutor(max_workers=GEMINI_WORKERS) as executor:
             for vd in video_data:
-                if vd["transcript"]:
+                if vd.get("audio_path"):
                     f = executor.submit(
                         extract_transcript_arguments,
-                        gemini, vd["url"], vd["title"], vd["transcript"], car_name,
+                        gemini, vd["url"], vd["title"], vd["audio_path"], car_name, vd["audio_mime"],
                     )
-                    transcript_futures[f] = vd
+                    audio_futures[f] = vd
 
                 if vd["comments"]:
                     f = executor.submit(
@@ -931,13 +962,14 @@ def main() -> None:
                     )
                     comment_futures[f] = vd
 
-            for future in as_completed(transcript_futures):
-                vd = transcript_futures[future]
+            for future in as_completed(audio_futures):
+                vd = audio_futures[future]
                 try:
                     args = future.result()
                     found = {cat: 0 for cat in CATEGORIES}
                     for arg in args:
-                        arg["rank"] = vd["video_rank"]
+                        mc = arg.pop("mention_count", 1)
+                        arg["rank"] = vd["video_rank"] * math.log(1 + mc)
                         cat = arg.get("category")
                         if cat in raw_arguments:
                             with _lock:
@@ -948,11 +980,11 @@ def main() -> None:
                         done_now = t_done
                     summary = ", ".join(f"{cat}:{n}" for cat, n in found.items() if n)
                     log.info(
-                        f"  [transcript {done_now}/{n_transcripts}] "
+                        f"  [audio {done_now}/{n_audio_videos}] "
                         f"{vd['title'][:55]} → {summary or 'no args'}"
                     )
                 except Exception as e:
-                    log.warning(f"Transcript future error ({vd['url']}): {e}")
+                    log.warning(f"Audio future error ({vd['url']}): {e}")
 
             for future in as_completed(comment_futures):
                 vd = comment_futures[future]

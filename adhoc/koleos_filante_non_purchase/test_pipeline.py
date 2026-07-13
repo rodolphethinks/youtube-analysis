@@ -62,20 +62,25 @@ def test_video_details(yt, video_id: str):
     return details
 
 
-# ── Test 3: Transcript fetching ────────────────────────────────────────────────
-def test_transcript(video_id: str):
-    print("\n[3] Transcript (youtube-transcript-api)")
+# ── Test 3: Audio download ──────────────────────────────────────────────────────────────────────────────────
+def test_audio_download(video_id: str):
+    print("\n[3] Audio Download (yt_dlp)")
     if not video_id:
         print(f"  {SKIP} No video ID available")
-        return
-    api = A.build_transcript_api()
-    transcript = A.fetch_transcript(video_id, api)
-    if transcript is None:
-        print(f"  {SKIP} No captions available for this video (try another)")
-    else:
-        check("Transcript is a non-empty string", isinstance(transcript, str) and len(transcript) > 50,
-              f"{len(transcript)} chars")
-    return transcript
+        return None
+    import tempfile
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    with tempfile.TemporaryDirectory() as tmp:
+        result = A._download_audio(url, tmp)
+    if result is None:
+        print(f"  {SKIP} Audio unavailable for this video")
+        return None
+    path, mime = result
+    # path is gone (tempdir cleaned up) — just check we got a valid response
+    check("Returns (path, mime) tuple", True, f"mime={mime}")
+    check("Mime type is audio/*", mime.startswith("audio/"), mime)
+    print(f"    → mime={mime}")
+    return video_id  # return id for test 7
 
 
 # ── Test 4: Comment fetching (pagination) ─────────────────────────────────────
@@ -140,24 +145,32 @@ def test_parse_json():
     check("Invalid returns None", r is None)
 
 
-# ── Test 7: Gemini transcript argument extraction ──────────────────────────────
-def test_gemini_transcript(transcript: str, video_id: str):
-    print("\n[7] Gemini — Transcript Argument Extraction")
-    if not transcript:
-        print(f"  {SKIP} No transcript available")
+# ── Test 7: Gemini audio argument extraction ──────────────────────────────────
+def test_gemini_audio(video_id: str):
+    print("\n[7] Gemini — Audio Argument Extraction")
+    if not video_id:
+        print(f"  {SKIP} No video ID available")
         return
     gemini = A.init_gemini(A.GOOGLE_API_KEY)
     url = f"https://www.youtube.com/watch?v={video_id}"
-    args = A.extract_transcript_arguments(
-        gemini, url, "Test video", transcript[:3000], "Renault Grand Koleos"
-    )
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        result = A._download_audio(url, tmp_dir)
+        if not result:
+            print(f"  {SKIP} Audio download unavailable for {video_id} — skipping Gemini test")
+            return
+        audio_path, mime_type = result
+        args = A.extract_transcript_arguments(
+            gemini, url, "Test video", audio_path, "Renault Grand Koleos", mime_type
+        )
     check("Returns a list", isinstance(args, list))
     if args:
         check("Arguments have required keys", all(
             k in args[0] for k in ["category", "argument", "quote", "source_url", "source_type"]
         ))
         check("All categories are valid", all(a["category"] in A.CATEGORIES for a in args))
-        check("source_type == 'transcript'", all(a["source_type"] == "transcript" for a in args))
+        check("source_type == 'audio'", all(a["source_type"] == "audio" for a in args))
         print(f"    → {len(args)} argument(s) extracted")
         for a in args[:3]:
             print(f"       [{a['category']}] {a['argument'][:80]}")
@@ -331,11 +344,11 @@ if __name__ == "__main__":
 
     yt, first_video_id = test_youtube_search()
     details = test_video_details(yt, first_video_id)
-    transcript = test_transcript(first_video_id)
+    test_audio_download(first_video_id)
     comments = test_comments(yt, first_video_id)
     test_ranking()
     test_parse_json()
-    test_gemini_transcript(transcript, first_video_id)
+    test_gemini_audio(first_video_id)
     test_gemini_comments(comments, first_video_id)
     test_merge_rerank()
     test_docx_report()
