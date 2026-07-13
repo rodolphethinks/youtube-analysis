@@ -189,9 +189,15 @@ def fetch_comments(yt, video_id: str, max_comments: int = MAX_COMMENTS) -> list[
     Paginates across up to 2 pages (200 comments max).
     """
     comments: list[dict] = []
+    seen_ids: set[str] = set()  # dedupe: relevance-ordered pagination can repeat items across pages
 
     def _parse_page(response: dict) -> None:
         for item in response.get("items", []):
+            thread_id = item.get("id", "")
+            if thread_id and thread_id in seen_ids:
+                continue
+            if thread_id:
+                seen_ids.add(thread_id)
             s = item["snippet"]["topLevelComment"]["snippet"]
             comments.append({
                 "video_id": video_id,
@@ -335,7 +341,7 @@ class QuoteItem(BaseModel):
 
 class MergedArgument(BaseModel):
     argument: str = Field(description="Merged management-ready English argument title (max 20 words)")
-    combined_rank: float = Field(description="Sum of ranks of merged items, capped at 1.0")
+    combined_rank: float = Field(description="Rough relative-importance estimate for sorting only; the actual displayed score is computed deterministically in Python from summed source ranks")
     quotes: list[QuoteItem] = Field(description="2-3 most illustrative quotes")
     source_count: int = Field(description="Total number of input lines (comments/transcript mentions) grouped into this merged argument, i.e. the sum of each input line's own count:N value")
     source_indices: list[int] = Field(default_factory=list, description="Every 0-based idx (from the input line list) placed in this group — not just the illustrative ones")
@@ -348,6 +354,25 @@ class MergedArguments(BaseModel):
 
 def init_gemini(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
+
+
+# Thread-safe token usage accumulator, for cost accounting across a run
+# (populated by _gemini_call; read via get_token_usage()).
+import threading as _threading
+_token_lock = _threading.Lock()
+_token_usage = {"prompt_tokens": 0, "output_tokens": 0, "calls": 0}
+
+
+def get_token_usage() -> dict:
+    with _token_lock:
+        return dict(_token_usage)
+
+
+def reset_token_usage() -> None:
+    with _token_lock:
+        _token_usage["prompt_tokens"] = 0
+        _token_usage["output_tokens"] = 0
+        _token_usage["calls"] = 0
 
 
 def _gemini_call(client: genai.Client, prompt: str, schema: type, contents=None) -> Optional[object]:
@@ -363,6 +388,12 @@ def _gemini_call(client: genai.Client, prompt: str, schema: type, contents=None)
                     response_schema=schema,
                 ),
             )
+            usage = getattr(resp, "usage_metadata", None)
+            if usage is not None:
+                with _token_lock:
+                    _token_usage["prompt_tokens"] += getattr(usage, "prompt_token_count", 0) or 0
+                    _token_usage["output_tokens"] += getattr(usage, "candidates_token_count", 0) or 0
+                    _token_usage["calls"] += 1
             return schema.model_validate_json(resp.text)
         except Exception as e:
             if attempt < GEMINI_RETRY_ATTEMPTS - 1:
@@ -546,7 +577,7 @@ def _merge_chunk(
         f"Task:\n"
         f"1. Group semantically similar/overlapping arguments together\n"
         f"2. Merge each group into ONE clear English argument title (max 20 words)\n"
-        f"3. Sum ranks of merged items (cap combined_rank at 1.0)\n"
+        f"3. Estimate combined_rank as the group's relative importance (any positive number — used only as a rough sort hint, the real score is computed separately)\n"
         f"4. Keep 2-3 most illustrative quotes per group (original Korean OK)\n"
         f"5. Set source_indices to EVERY idx value placed in that group (not just the illustrative ones)\n"
         f"6. Set source_count to the sum of count:N across every input line placed in that group\n"
@@ -562,12 +593,16 @@ def _merge_chunk(
     for m in result.merged_arguments:
         valid_idx = [i for i in m.source_indices if isinstance(i, int) and 0 <= i < n]
         members = [chunk[i] for i in valid_idx]
-        # Deterministic count from the actual grouped members (falls back to Gemini's
-        # own sum only if it failed to report any valid indices).
+        # Deterministic count/rank from the actual grouped members — never trust Gemini's
+        # own arithmetic. Falls back to Gemini's raw estimate only if it failed to report
+        # any valid indices. combined_rank is left uncapped here; it's normalized to a
+        # 0-1 scale exactly once, at the very end of merge_and_rerank, to avoid the
+        # double-capping that caused many arguments to saturate at 1.0.
         source_count = sum(mm.get("source_count", 1) for mm in members) if members else max(m.source_count, 1)
+        combined_rank = sum(mm.get("rank", 0.0) for mm in members) if members else max(m.combined_rank, 0.0)
         out.append({
             "argument": m.argument,
-            "combined_rank": min(m.combined_rank, 1.0),
+            "combined_rank": combined_rank,
             "quotes": [{"text": q.text, "source_url": q.source_url, "source_type": q.source_type} for q in m.quotes],
             "source_count": max(source_count, 1),
             "members": members,
@@ -662,8 +697,20 @@ def merge_and_rerank(
             log.warning(f"  Pass 2 merge failed for {car_name}/{category}, using pass1 top-{MERGE_MAX_FINAL}")
             final = sorted(pass1_results, key=lambda x: x.get("combined_rank", 0.0), reverse=True)
 
-    # Hard cap
-    return final[:MERGE_MAX_FINAL]
+    # Re-sort by the deterministic combined_rank we just computed — Gemini's own
+    # ordering of merged2 reflected its untrusted internal estimate, not the real
+    # recomputed score, so results could otherwise display out of rank order.
+    final = sorted(final, key=lambda x: x.get("combined_rank", 0.0), reverse=True)[:MERGE_MAX_FINAL]
+
+    # Normalize combined_rank to 0-1 exactly once, here, relative to the top argument in
+    # this category — instead of capping at each merge stage (which caused many
+    # unrelated arguments to all saturate at 1.0 and become indistinguishable).
+    max_rank = max((f.get("combined_rank", 0.0) for f in final), default=0.0)
+    if max_rank > 0:
+        for f in final:
+            f["combined_rank"] = round(f.get("combined_rank", 0.0) / max_rank, 4)
+
+    return final
 
 
 # ── Docx helpers ───────────────────────────────────────────────────────────────
