@@ -337,6 +337,7 @@ class MergedArgument(BaseModel):
     argument: str = Field(description="Merged management-ready English argument title (max 20 words)")
     combined_rank: float = Field(description="Sum of ranks of merged items, capped at 1.0")
     quotes: list[QuoteItem] = Field(description="2-3 most illustrative quotes")
+    source_count: int = Field(description="Total number of input lines (comments/transcript mentions) grouped into this merged argument, i.e. the sum of each input line's own count:N value")
 
 class MergedArguments(BaseModel):
     merged_arguments: list[MergedArgument]
@@ -531,22 +532,23 @@ def _merge_chunk(
         return v if isinstance(v, str) else ""
 
     lines = [
-        f"[rank:{a.get('rank', 0.0):.4f}|type:{a.get('source_type','')}|url:{a.get('source_url','')}] "
+        f"[rank:{a.get('rank', 0.0):.4f}|type:{a.get('source_type','')}|url:{a.get('source_url','')}|count:{a.get('source_count', 1)}] "
         f"{a.get('argument','')} || quote: {(_safe_str(a.get('quote')) or _safe_str(a.get('comment')))[:120]}"
         for a in chunk
     ]
     prompt = (
         f"You are a senior market research analyst writing a management briefing.\n\n"
         f"Arguments from Korean YouTube videos/comments about the {car_name} — category: {category_label}.\n\n"
-        f"Each line: [rank:X|type:transcript/comment|url:...] argument || quote: ...\n"
-        f"Higher rank = more impactful source.\n\n"
+        f"Each line: [rank:X|type:transcript/comment|url:...|count:N] argument || quote: ...\n"
+        f"Higher rank = more impactful source. count:N is how many individual sources that single line already represents.\n\n"
         f"Task:\n"
         f"1. Group semantically similar/overlapping arguments together\n"
         f"2. Merge each group into ONE clear English argument title (max 20 words)\n"
         f"3. Sum ranks of merged items (cap combined_rank at 1.0)\n"
         f"4. Keep 2-3 most illustrative quotes per group (original Korean OK)\n"
-        f"5. Target 5-10 merged arguments maximum — aggressively group similar themes\n"
-        f"6. Sort by combined_rank descending\n\n"
+        f"5. Set source_count to the sum of count:N across every input line placed in that group\n"
+        f"6. Target 5-10 merged arguments maximum — aggressively group similar themes\n"
+        f"7. Sort by combined_rank descending\n\n"
         f"Arguments:\n" + "\n".join(lines)
     )
     result = _gemini_call(client, prompt, MergedArguments)
@@ -557,6 +559,7 @@ def _merge_chunk(
             "argument": m.argument,
             "combined_rank": min(m.combined_rank, 1.0),
             "quotes": [{"text": q.text, "source_url": q.source_url, "source_type": q.source_type} for q in m.quotes],
+            "source_count": max(m.source_count, 1),
         }
         for m in result.merged_arguments
     ]
@@ -599,6 +602,7 @@ def merge_and_rerank(
                     "argument": a.get("argument", ""),
                     "combined_rank": round(a.get("rank", 0.0), 4),
                     "quotes": [{"text": quote_text[:200], "source_url": a.get("source_url", ""), "source_type": a.get("source_type", "")}],
+                    "source_count": a.get("source_count", 1),
                 })
 
     if not pass1_results:
@@ -617,6 +621,7 @@ def merge_and_rerank(
                 "quote": r["quotes"][0]["text"] if r.get("quotes") else "",
                 "source_url": r["quotes"][0]["source_url"] if r.get("quotes") else "",
                 "source_type": r["quotes"][0]["source_type"] if r.get("quotes") else "",
+                "source_count": r.get("source_count", 1),
             }
             for r in pass1_results
         ]
@@ -660,6 +665,7 @@ def _add_argument_block(doc: Document, rank_idx: int, merged: dict) -> None:
     arg_text = merged.get("argument", "N/A")
     combined_rank = merged.get("combined_rank", 0.0)
     quotes = merged.get("quotes", [])
+    source_count = merged.get("source_count", 1)
 
     # Argument title
     p = doc.add_paragraph()
@@ -671,7 +677,8 @@ def _add_argument_block(doc: Document, rank_idx: int, merged: dict) -> None:
     run_main = p.add_run(arg_text)
     run_main.bold = True
     run_main.font.size = Pt(11)
-    run_score = p.add_run(f"  [score: {combined_rank:.3f}]")
+    source_label = "source" if source_count == 1 else "sources"
+    run_score = p.add_run(f"  [score: {combined_rank:.3f} · {source_count} {source_label}]")
     run_score.font.size = Pt(9)
     run_score.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
 
