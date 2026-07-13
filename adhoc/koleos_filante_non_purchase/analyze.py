@@ -338,6 +338,7 @@ class MergedArgument(BaseModel):
     combined_rank: float = Field(description="Sum of ranks of merged items, capped at 1.0")
     quotes: list[QuoteItem] = Field(description="2-3 most illustrative quotes")
     source_count: int = Field(description="Total number of input lines (comments/transcript mentions) grouped into this merged argument, i.e. the sum of each input line's own count:N value")
+    source_indices: list[int] = Field(default_factory=list, description="Every 0-based idx (from the input line list) placed in this group — not just the illustrative ones")
 
 class MergedArguments(BaseModel):
     merged_arguments: list[MergedArgument]
@@ -532,37 +533,46 @@ def _merge_chunk(
         return v if isinstance(v, str) else ""
 
     lines = [
-        f"[rank:{a.get('rank', 0.0):.4f}|type:{a.get('source_type','')}|url:{a.get('source_url','')}|count:{a.get('source_count', 1)}] "
+        f"[idx:{i}|rank:{a.get('rank', 0.0):.4f}|type:{a.get('source_type','')}|url:{a.get('source_url','')}|count:{a.get('source_count', 1)}] "
         f"{a.get('argument','')} || quote: {(_safe_str(a.get('quote')) or _safe_str(a.get('comment')))[:120]}"
-        for a in chunk
+        for i, a in enumerate(chunk)
     ]
     prompt = (
         f"You are a senior market research analyst writing a management briefing.\n\n"
         f"Arguments from Korean YouTube videos/comments about the {car_name} — category: {category_label}.\n\n"
-        f"Each line: [rank:X|type:transcript/comment|url:...|count:N] argument || quote: ...\n"
+        f"Each line: [idx:i|rank:X|type:transcript/comment|url:...|count:N] argument || quote: ...\n"
+        f"idx:i is the 0-based index of that line — use it to report exactly which lines were grouped.\n"
         f"Higher rank = more impactful source. count:N is how many individual sources that single line already represents.\n\n"
         f"Task:\n"
         f"1. Group semantically similar/overlapping arguments together\n"
         f"2. Merge each group into ONE clear English argument title (max 20 words)\n"
         f"3. Sum ranks of merged items (cap combined_rank at 1.0)\n"
         f"4. Keep 2-3 most illustrative quotes per group (original Korean OK)\n"
-        f"5. Set source_count to the sum of count:N across every input line placed in that group\n"
-        f"6. Target 5-10 merged arguments maximum — aggressively group similar themes\n"
-        f"7. Sort by combined_rank descending\n\n"
+        f"5. Set source_indices to EVERY idx value placed in that group (not just the illustrative ones)\n"
+        f"6. Set source_count to the sum of count:N across every input line placed in that group\n"
+        f"7. Target 5-10 merged arguments maximum — aggressively group similar themes\n"
+        f"8. Sort by combined_rank descending\n\n"
         f"Arguments:\n" + "\n".join(lines)
     )
     result = _gemini_call(client, prompt, MergedArguments)
     if not result:
         return []
-    return [
-        {
+    n = len(chunk)
+    out = []
+    for m in result.merged_arguments:
+        valid_idx = [i for i in m.source_indices if isinstance(i, int) and 0 <= i < n]
+        members = [chunk[i] for i in valid_idx]
+        # Deterministic count from the actual grouped members (falls back to Gemini's
+        # own sum only if it failed to report any valid indices).
+        source_count = sum(mm.get("source_count", 1) for mm in members) if members else max(m.source_count, 1)
+        out.append({
             "argument": m.argument,
             "combined_rank": min(m.combined_rank, 1.0),
             "quotes": [{"text": q.text, "source_url": q.source_url, "source_type": q.source_type} for q in m.quotes],
-            "source_count": max(m.source_count, 1),
-        }
-        for m in result.merged_arguments
-    ]
+            "source_count": max(source_count, 1),
+            "members": members,
+        })
+    return out
 
 
 def merge_and_rerank(
@@ -590,7 +600,14 @@ def merge_and_rerank(
     for idx, chunk in enumerate(chunks):
         merged = _merge_chunk(client, chunk, category_label, car_name)
         if merged:
-            pass1_results.extend(merged)
+            for m in merged:
+                pass1_results.append({
+                    "argument": m["argument"],
+                    "combined_rank": m["combined_rank"],
+                    "quotes": m["quotes"],
+                    "source_count": m["source_count"],
+                    "source_items": m["members"],
+                })
             log.info(f"    Chunk {idx+1}/{len(chunks)}: {len(chunk)} args → {len(merged)} merged")
         else:
             # chunk fallback: top-5 by rank
@@ -603,6 +620,7 @@ def merge_and_rerank(
                     "combined_rank": round(a.get("rank", 0.0), 4),
                     "quotes": [{"text": quote_text[:200], "source_url": a.get("source_url", ""), "source_type": a.get("source_type", "")}],
                     "source_count": a.get("source_count", 1),
+                    "source_items": [a],
                 })
 
     if not pass1_results:
@@ -613,7 +631,9 @@ def merge_and_rerank(
     if len(pass1_results) <= MERGE_MAX_FINAL:
         final = sorted(pass1_results, key=lambda x: x.get("combined_rank", 0.0), reverse=True)
     else:
-        # Convert pass1 results to arg dicts compatible with _merge_chunk
+        # Convert pass1 results to arg dicts compatible with _merge_chunk.
+        # source_items is carried along unused by the prompt-building code, purely so
+        # we can flatten it back out once pass 2 tells us which pass-1 groups merged.
         p1_as_args = [
             {
                 "argument": r["argument"],
@@ -622,11 +642,23 @@ def merge_and_rerank(
                 "source_url": r["quotes"][0]["source_url"] if r.get("quotes") else "",
                 "source_type": r["quotes"][0]["source_type"] if r.get("quotes") else "",
                 "source_count": r.get("source_count", 1),
+                "source_items": r.get("source_items", []),
             }
             for r in pass1_results
         ]
-        final = _merge_chunk(client, p1_as_args, category_label, car_name)
-        if not final:
+        merged2 = _merge_chunk(client, p1_as_args, category_label, car_name)
+        if merged2:
+            final = [
+                {
+                    "argument": m["argument"],
+                    "combined_rank": m["combined_rank"],
+                    "quotes": m["quotes"],
+                    "source_count": m["source_count"],
+                    "source_items": [item for member in m["members"] for item in member.get("source_items", [])],
+                }
+                for m in merged2
+            ]
+        else:
             log.warning(f"  Pass 2 merge failed for {car_name}/{category}, using pass1 top-{MERGE_MAX_FINAL}")
             final = sorted(pass1_results, key=lambda x: x.get("combined_rank", 0.0), reverse=True)
 
@@ -831,6 +863,61 @@ def build_docx_report(
 
     doc.save(str(output_path))
     log.info(f"Report saved → {output_path}")
+
+
+def build_sources_csv(results_per_car: dict, output_path: Path) -> None:
+    """
+    Deep-dive / verification export: one row per raw source (comment or transcript
+    mention) grouped into each merged argument shown in the report. Lets a reviewer
+    check that a merged argument's score/source_count isn't overcounted, and trace
+    any quote back to its original video/comment.
+    """
+    rows = []
+    for car_key, car_name in CAR_NAMES.items():
+        car_results = results_per_car.get(car_key, {})
+        for category in CATEGORIES:
+            merged_args = car_results.get(category, [])
+            for rank_idx, merged in enumerate(merged_args, 1):
+                arg_title = merged.get("argument", "N/A")
+                combined_rank = merged.get("combined_rank", 0.0)
+                declared_count = merged.get("source_count", 1)
+                source_items = merged.get("source_items", [])
+                if not source_items:
+                    rows.append({
+                        "car": car_name,
+                        "category": CATEGORY_LABELS.get(category, category),
+                        "argument_rank": rank_idx,
+                        "argument": arg_title,
+                        "combined_rank": combined_rank,
+                        "declared_source_count": declared_count,
+                        "actual_source_rows": 0,
+                        "source_index": "",
+                        "source_type": "",
+                        "source_rank": "",
+                        "source_url": "",
+                        "quote_or_comment": "",
+                    })
+                    continue
+                for s_idx, item in enumerate(source_items, 1):
+                    _q, _c = item.get("quote"), item.get("comment")
+                    text = (_q if isinstance(_q, str) else "") or (_c if isinstance(_c, str) else "")
+                    rows.append({
+                        "car": car_name,
+                        "category": CATEGORY_LABELS.get(category, category),
+                        "argument_rank": rank_idx,
+                        "argument": arg_title,
+                        "combined_rank": combined_rank,
+                        "declared_source_count": declared_count,
+                        "actual_source_rows": len(source_items),
+                        "source_index": s_idx,
+                        "source_type": item.get("source_type", ""),
+                        "source_rank": item.get("rank", ""),
+                        "source_url": item.get("source_url", ""),
+                        "quote_or_comment": text,
+                    })
+
+    pd.DataFrame(rows).to_csv(output_path, index=False, encoding="utf-8-sig")
+    log.info(f"Sources deep-dive CSV saved → {output_path}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -1070,6 +1157,9 @@ def main() -> None:
     log.info("\nStep 6: Generating .docx report...")
     output_path = OUTPUT_DIR / "koleos_filante_non_purchase_analysis.docx"
     build_docx_report(results_per_car, video_counts, comment_counts, output_path)
+
+    sources_path = OUTPUT_DIR / "koleos_filante_sources_deep_dive.csv"
+    build_sources_csv(results_per_car, sources_path)
 
     log.info(f"\nDone. Report: {output_path}")
 

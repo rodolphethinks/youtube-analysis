@@ -213,6 +213,10 @@ def main() -> None:
     log.info("\nGenerating .docx report...")
     output_path = A.OUTPUT_DIR / "koleos_filante_non_purchase_analysis.docx"
     A.build_docx_report(results_per_car, video_counts, comment_counts, output_path)
+
+    sources_path = A.OUTPUT_DIR / "koleos_filante_sources_deep_dive.csv"
+    A.build_sources_csv(results_per_car, sources_path)
+
     log.info(f"Done. Report: {output_path}")
 
 
