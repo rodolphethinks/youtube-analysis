@@ -525,9 +525,14 @@ def _merge_chunk(
     car_name: str,
 ) -> list[dict]:
     """Merge one chunk of ≤MERGE_CHUNK_SIZE arguments via Gemini structured output."""
+    def _safe_str(v) -> str:
+        # Guards against NaN (float) values coming from pandas round-trips through CSV,
+        # where a missing 'quote'/'comment' cell becomes float('nan') instead of "".
+        return v if isinstance(v, str) else ""
+
     lines = [
         f"[rank:{a.get('rank', 0.0):.4f}|type:{a.get('source_type','')}|url:{a.get('source_url','')}] "
-        f"{a.get('argument','')} || quote: {(a.get('quote') or a.get('comment',''))[:120]}"
+        f"{a.get('argument','')} || quote: {(_safe_str(a.get('quote')) or _safe_str(a.get('comment')))[:120]}"
         for a in chunk
     ]
     prompt = (
@@ -588,7 +593,8 @@ def merge_and_rerank(
             # chunk fallback: top-5 by rank
             log.warning(f"    Chunk {idx+1}/{len(chunks)}: merge failed, using top-5 fallback")
             for a in sorted(chunk, key=lambda x: x.get("rank", 0.0), reverse=True)[:5]:
-                quote_text = a.get("quote") or a.get("comment", "")
+                _q, _c = a.get("quote"), a.get("comment")
+                quote_text = (_q if isinstance(_q, str) else "") or (_c if isinstance(_c, str) else "")
                 pass1_results.append({
                     "argument": a.get("argument", ""),
                     "combined_rank": round(a.get("rank", 0.0), 4),
@@ -756,7 +762,7 @@ def build_docx_report(
     p = doc.add_paragraph()
     p.add_run("Argument Extraction: ").bold = True
     p.add_run(
-        "Gemini 2.0 Flash extracts arguments from transcripts (per video) "
+        f"{GEMINI_MODEL} extracts arguments from transcripts (per video) "
         "and from comment batches of 50. Arguments are then semantically clustered "
         "and re-ranked by Gemini, with ranks summed across matching sources."
     )

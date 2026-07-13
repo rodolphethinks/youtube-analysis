@@ -144,14 +144,13 @@ def main() -> None:
 
     client = A.init_gemini(A.GOOGLE_API_KEY)
 
-    # Load video/comment counts for report header
+    # Load video counts for report header (comment counts are filled in per-car below,
+    # once we know how many comment-sourced arguments were actually loaded/used).
     video_counts: dict[str, int] = {}
     comment_counts: dict[str, int] = {}
     for car_key in A.CAR_NAMES:
         vid_csv = A.OUTPUT_DIR / f"{car_key}_videos.csv"
         video_counts[car_key] = len(pd.read_csv(vid_csv, encoding="utf-8-sig")) if vid_csv.exists() else 0
-        com_csv = A.OUTPUT_DIR / f"{car_key}_comments.csv"
-        comment_counts[car_key] = len(pd.read_csv(com_csv, encoding="utf-8-sig")) if com_csv.exists() else 0
 
     results_per_car: dict[str, dict[str, list]] = {}
 
@@ -163,6 +162,9 @@ def main() -> None:
 
         # Step 4: load existing comment arguments
         comment_args = load_comment_arguments(car_key)
+        # Count distinct qualifying comments (one comment can yield >1 argument rows
+        # across categories, so dedupe on the original comment text for an accurate count).
+        comment_counts[car_key] = len({a.get("comment") for a in comment_args if a.get("comment")})
 
         # Combine and save
         all_args = audio_args + comment_args
