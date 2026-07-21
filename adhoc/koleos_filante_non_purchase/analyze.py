@@ -44,6 +44,9 @@ from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -52,6 +55,9 @@ load_dotenv(ROOT / ".env")
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+CACHE_DIR = OUTPUT_DIR / "extraction_cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,6 +85,10 @@ COMMENT_BATCH_SIZE = 50
 GEMINI_WORKERS = 5        # parallel Gemini threads
 MAX_RESULTS_PER_QUERY = 25
 GEMINI_RETRY_ATTEMPTS = 3
+
+# gemini-3.1-flash-lite standard/paid tier pricing (ai.google.dev/gemini-api/docs/pricing)
+INPUT_PRICE_PER_1M = 0.25
+OUTPUT_PRICE_PER_1M = 1.50
 
 CAR_NAMES = {
     "koleos": "Renault Grand Koleos",
@@ -200,6 +210,7 @@ def fetch_comments(yt, video_id: str, max_comments: int = MAX_COMMENTS) -> list[
                 seen_ids.add(thread_id)
             s = item["snippet"]["topLevelComment"]["snippet"]
             comments.append({
+                "comment_id": thread_id,
                 "video_id": video_id,
                 "author": s.get("authorDisplayName", ""),
                 "comment": s.get("textDisplay", ""),
@@ -451,18 +462,30 @@ def extract_transcript_arguments(
     try:
         prompt = (
             f"You are a Korean automotive market research analyst preparing a management briefing.\n\n"
-            f"Listen to this YouTube video about the {car_name} and extract negative arguments.\n\n"
-            f"Extract arguments in exactly these three categories:\n"
-            f'1. "non_purchase" – explicit reasons a consumer would NOT buy the {car_name}\n'
-            f'2. "competitor" – reasons to prefer a competitor car over the {car_name}\n'
-            f'3. "regret" – reasons why a buyer of the {car_name} might regret the purchase\n\n'
+            f"Listen to this YouTube video about the {car_name} and extract NEGATIVE arguments about the {car_name} itself.\n\n"
+            f"Extract arguments in exactly these three categories — each MUST be framed negatively about "
+            f"the {car_name}, never positively:\n"
+            f'1. "non_purchase" – an explicit reason someone gives for NOT buying the {car_name} '
+            f'(a flaw, dealbreaker, or missing feature OF THE {car_name} ITSELF)\n'
+            f'2. "competitor" – an explicit statement that a NAMED alternative car is BETTER than the '
+            f'{car_name} and would be chosen instead (the comparison must clearly favor the competitor, '
+            f'not the {car_name})\n'
+            f'3. "regret" – a negative statement from someone who ALREADY OWNS the {car_name}, expressing '
+            f'regret or disappointment after purchase\n\n'
+            f"Do NOT extract (skip entirely — never force these into a category):\n"
+            f"- Positive statements about the {car_name} itself (e.g., praising its performance, design, "
+            f"tech, or price vs rivals) — even if made while comparing to a competitor\n"
+            f"- Purely negative statements about a competitor/rival brand that do not explicitly state the "
+            f"{car_name} would be chosen instead\n"
+            f'- Example of what to SKIP: "{car_name} has better handling and a more efficient hybrid than '
+            f'Hyundai/Kia" — this is POSITIVE about the {car_name}; do not extract it under any category.\n'
+            f"- General industry/market commentary not tied to a specific purchase decision\n\n"
             f"Rules:\n"
             f"- Only include arguments clearly stated or strongly implied in the audio\n"
             f"- argument: concise English sentence (max 20 words)\n"
             f"- quote: verbatim phrase from the audio (Korean OK, max 60 words)\n"
             f"- mention_count: how many times this theme appears in the audio\n"
-            f"- Sort by mention_count descending within each category\n"
-            f"- Skip purely positive or off-topic content\n\n"
+            f"- Sort by mention_count descending within each category\n\n"
             f"Video title: {title}"
         )
         result = _gemini_call(client, prompt, TranscriptArguments, contents=[prompt, uploaded])
@@ -519,11 +542,20 @@ def extract_comment_arguments(
         prompt = (
             f"You are a Korean automotive market research analyst.\n\n"
             f"Below are YouTube comments from a video about the {car_name}.\n\n"
-            f"Identify ONLY comments that contain arguments in these categories:\n"
-            f'1. "non_purchase" – reasons not to buy the {car_name}\n'
-            f'2. "competitor" – reasons to prefer a competitor car over the {car_name}\n'
-            f'3. "regret" – regret after buying the {car_name}\n\n'
-            f"Ignore: general praise, off-topic comments, questions without arguments, greetings, emojis-only.\n\n"
+            f"Identify ONLY comments that contain arguments in these categories — each MUST be framed "
+            f"negatively about the {car_name} itself, never positively:\n"
+            f'1. "non_purchase" – an explicit reason NOT to buy the {car_name} (a flaw, dealbreaker, or '
+            f'missing feature OF THE {car_name} ITSELF)\n'
+            f'2. "competitor" – an explicit statement that a NAMED alternative car is BETTER and would be '
+            f'chosen instead of the {car_name} (must clearly favor the competitor, not the {car_name})\n'
+            f'3. "regret" – regret or disappointment expressed by someone who ALREADY OWNS the {car_name}\n\n'
+            f"Ignore / do NOT extract:\n"
+            f"- General praise, off-topic comments, questions without arguments, greetings, emojis-only\n"
+            f"- Positive statements about the {car_name} itself, even when comparing it favorably to a competitor\n"
+            f"- Purely negative statements about a competitor/rival brand that do not explicitly say the "
+            f"{car_name} would be chosen instead\n"
+            f'- Example of what to SKIP: "{car_name} has better handling and a more efficient hybrid than '
+            f'Hyundai/Kia" — this is POSITIVE about the {car_name}; do not extract it under any category.\n\n'
             f"Video: {title}\nComments:\n{numbered}"
         )
         result = _gemini_call(client, prompt, CommentArguments)
@@ -600,10 +632,36 @@ def _merge_chunk(
         # double-capping that caused many arguments to saturate at 1.0.
         source_count = sum(mm.get("source_count", 1) for mm in members) if members else max(m.source_count, 1)
         combined_rank = sum(mm.get("rank", 0.0) for mm in members) if members else max(m.combined_rank, 0.0)
+
+        # Deterministic quote selection: pick the highest-weight (rank) members rather
+        # than trusting Gemini's own quote picks, so the displayed examples always match
+        # whichever sources actually drove the argument's score.
+        if members:
+            seen_texts: set[str] = set()
+            top_quotes = []
+            for mm in sorted(members, key=lambda x: x.get("rank", 0.0), reverse=True):
+                text = _safe_str(mm.get("quote")) or _safe_str(mm.get("comment"))
+                if not text or text in seen_texts:
+                    continue
+                seen_texts.add(text)
+                top_quotes.append({
+                    "text": text[:300],
+                    "source_url": mm.get("source_url", ""),
+                    "source_type": mm.get("source_type", ""),
+                    "date": mm.get("date", ""),
+                    "likes": mm.get("likes", ""),
+                    "views": mm.get("views", ""),
+                })
+                if len(top_quotes) >= 3:
+                    break
+            quotes = top_quotes or [{"text": q.text, "source_url": q.source_url, "source_type": q.source_type} for q in m.quotes]
+        else:
+            quotes = [{"text": q.text, "source_url": q.source_url, "source_type": q.source_type} for q in m.quotes]
+
         out.append({
             "argument": m.argument,
             "combined_rank": combined_rank,
-            "quotes": [{"text": q.text, "source_url": q.source_url, "source_type": q.source_type} for q in m.quotes],
+            "quotes": quotes,
             "source_count": max(source_count, 1),
             "members": members,
         })
@@ -779,8 +837,21 @@ def _add_argument_block(doc: Document, rank_idx: int, merged: dict) -> None:
         quote_run.font.size = Pt(9.5)
         quote_run.font.color.rgb = RGBColor(0x33, 0x33, 0x55)
 
+        meta_bits = []
+        q_date = q.get("date", "")
+        if q_date:
+            meta_bits.append(str(q_date))
+        q_views = q.get("views", "")
+        if isinstance(q_views, (int, float)) and q_views:
+            meta_bits.append(f"{int(q_views):,} views")
+        q_likes = q.get("likes", "")
+        if isinstance(q_likes, (int, float)) and q_likes:
+            meta_bits.append(f"{int(q_likes):,} likes")
+        meta_str = "  ·  ".join(meta_bits)
+
         if q_url:
-            src_run = q_para.add_run(f"\n  → {q_url}  [{q_type}]")
+            suffix = f"  [{meta_str}]" if meta_str else ""
+            src_run = q_para.add_run(f"\n  → {q_url}  [{q_type}]{suffix}")
             src_run.font.size = Pt(8)
             src_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
 
@@ -941,6 +1012,9 @@ def build_sources_csv(results_per_car: dict, output_path: Path) -> None:
                         "source_index": "",
                         "source_type": "",
                         "source_rank": "",
+                        "source_date": "",
+                        "source_likes": "",
+                        "source_views": "",
                         "source_url": "",
                         "quote_or_comment": "",
                     })
@@ -959,6 +1033,9 @@ def build_sources_csv(results_per_car: dict, output_path: Path) -> None:
                         "source_index": s_idx,
                         "source_type": item.get("source_type", ""),
                         "source_rank": item.get("rank", ""),
+                        "source_date": item.get("date", ""),
+                        "source_likes": item.get("likes", ""),
+                        "source_views": item.get("views", ""),
                         "source_url": item.get("source_url", ""),
                         "quote_or_comment": text,
                     })
@@ -967,11 +1044,95 @@ def build_sources_csv(results_per_car: dict, output_path: Path) -> None:
     log.info(f"Sources deep-dive CSV saved → {output_path}")
 
 
+def _load_json_cache(path: Path) -> dict:
+    """Load a per-car extraction cache (already-processed videos/comments), or start fresh."""
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data.setdefault("videos", {})
+            data.setdefault("comments", {})
+            return data
+        except Exception:
+            log.warning(f"Failed to load cache {path}, starting fresh.")
+    return {"videos": {}, "comments": {}}
+
+
+def _save_json_cache(path: Path, data: dict) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def build_evolution_graphs(results_per_car: dict, output_dir: Path, top_n: int = 5) -> None:
+    """
+    For each car/category, plot the weekly-bucketed weighted mention volume of the
+    top-N merged arguments (by combined_rank) over time. Weight per mention is the
+    same 'rank' score used for report ranking (video_rank/comment_rank based), so
+    highly-liked/viewed sources count for more than a single generic mention.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for car_key, car_name in CAR_NAMES.items():
+        car_results = results_per_car.get(car_key, {})
+        for category in CATEGORIES:
+            merged_args = car_results.get(category, [])[:top_n]
+            if not merged_args:
+                continue
+
+            fig, ax = plt.subplots(figsize=(11, 6))
+            has_data = False
+
+            for merged in merged_args:
+                arg_title = merged.get("argument", "N/A")
+                source_items = merged.get("source_items", [])
+                rows = []
+                for item in source_items:
+                    date_str = item.get("date", "")
+                    weight = item.get("rank", 0.0)
+                    if not date_str:
+                        continue
+                    try:
+                        ts = pd.to_datetime(date_str)
+                    except (ValueError, TypeError):
+                        continue
+                    rows.append({"date": ts, "weight": weight})
+
+                if not rows:
+                    continue
+
+                s_df = pd.DataFrame(rows)
+                s_df["week"] = s_df["date"].dt.to_period("W").dt.start_time
+                weekly = s_df.groupby("week")["weight"].sum().sort_index()
+                if weekly.empty:
+                    continue
+
+                label = (arg_title[:60] + "…") if len(arg_title) > 60 else arg_title
+                ax.plot(weekly.index, weekly.values, marker="o", markersize=3, linewidth=1.5, label=label)
+                has_data = True
+
+            if not has_data:
+                plt.close(fig)
+                continue
+
+            label_cat = CATEGORY_LABELS.get(category, category)
+            ax.set_title(f"{car_name} — {label_cat}\nWeighted mention volume over time (top {top_n} arguments)")
+            ax.set_xlabel("Week")
+            ax.set_ylabel("Weighted mentions (summed source rank)")
+            ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.01, 1.0))
+            ax.grid(True, alpha=0.3)
+            fig.autofmt_xdate()
+            fig.tight_layout()
+
+            out_path = output_dir / f"{car_key}_{category}_evolution.png"
+            fig.savefig(out_path, dpi=150)
+            plt.close(fig)
+            log.info(f"  Graph saved → {out_path}")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     yt = build_youtube(YOUTUBE_API_KEY)
     gemini = init_gemini(GOOGLE_API_KEY)
+    reset_token_usage()
 
     results_per_car: dict[str, dict[str, list]] = {}
     video_counts: dict[str, int] = {}
@@ -979,6 +1140,11 @@ def main() -> None:
 
     for car_key, car_name in CAR_NAMES.items():
         log.info(f"\n{'=' * 60}\nProcessing: {car_name}\n{'=' * 60}")
+
+        cache_path = CACHE_DIR / f"{car_key}_cache.json"
+        cache = _load_json_cache(cache_path)
+        video_cache: dict = cache["videos"]
+        comment_cache: dict = cache["comments"]
 
         # ── Step 1: Search videos ──────────────────────────────────────────────
         log.info("Step 1: Searching YouTube for relevant videos...")
@@ -1040,6 +1206,9 @@ def main() -> None:
                 "url": row["url"],
                 "title": row["title"],
                 "video_rank": v_rank,
+                "published_at": row["published_at"],
+                "views": int(row["views"]),
+                "likes": int(row["likes"]),
                 "comments": qualifying,
             })
 
@@ -1060,29 +1229,88 @@ def main() -> None:
             )
         log.info(f"Comments saved to CSV.")
 
+        # ── Step 3b: split comments into already-processed (cached) vs new ─────
+        # Videos whose audio was already extracted in a previous run are skipped
+        # entirely for transcript extraction below, but we still fetch + diff
+        # comments every run since new comments can appear under old videos.
+        # comment_cache is keyed by YouTube commentThread id, so re-fetched
+        # duplicates across runs are naturally never double-counted.
+        for vd in video_data:
+            vd["new_comments"] = [c for c in vd["comments"] if c["comment_id"] not in comment_cache]
+
+        n_new_comments = sum(len(vd["new_comments"]) for vd in video_data)
+        n_cached_comments = total_qualifying_comments - n_new_comments
+        log.info(f"  Comments: {n_new_comments} new (→ Gemini), {n_cached_comments} already processed (cached)")
+
         # ── Step 4: Extract arguments in parallel ──────────────────────────────
-        n_audio_videos = len(video_data)
-        n_comment_videos = sum(1 for vd in video_data if vd["comments"])
+        videos_needing_audio = [vd for vd in video_data if vd["video_id"] not in video_cache]
+        videos_cached_audio = len(video_data) - len(videos_needing_audio)
         log.info(
             f"Step 4: Extracting arguments with Gemini ({GEMINI_WORKERS} workers)...\n"
-            f"  Audio jobs: {n_audio_videos} | Comment-batch jobs: {n_comment_videos}"
+            f"  Audio jobs: {len(videos_needing_audio)} new, {videos_cached_audio} cached (skipped) | "
+            f"Comment-batch jobs: {sum(1 for vd in video_data if vd['new_comments'])}"
         )
 
-        # Phase 4a: sequential audio downloads (avoids hammering YouTube)
+        # Phase 4a: sequential audio downloads (avoids hammering YouTube) — only for new videos
         log.info("  Phase 4a: downloading audio sequentially...")
         audio_dir = OUTPUT_DIR / f"{car_key}_audio"
         audio_dir.mkdir(exist_ok=True)
-        for i, vd in enumerate(video_data):
+        for i, vd in enumerate(videos_needing_audio):
             result = _download_audio(vd["url"], str(audio_dir))
             if result:
                 vd["audio_path"], vd["audio_mime"] = result
-                log.info(f"  [{i+1}/{n_audio_videos} ✓] {vd['title'][:65]}")
+                log.info(f"  [{i+1}/{len(videos_needing_audio)} ✓] {vd['title'][:65]}")
             else:
                 vd["audio_path"], vd["audio_mime"] = "", "audio/mp4"
-                log.info(f"  [{i+1}/{n_audio_videos} ✗] {vd['title'][:65]}")
+                log.info(f"  [{i+1}/{len(videos_needing_audio)} ✗] {vd['title'][:65]}")
             time.sleep(AUDIO_DOWNLOAD_DELAY)
 
         raw_arguments: dict[str, list[dict]] = {c: [] for c in CATEGORIES}
+
+        def _attach_transcript_meta(arg: dict, vd: dict) -> dict:
+            mc = arg.pop("mention_count", 1)
+            arg["rank"] = vd["video_rank"] * math.log(1 + mc)
+            arg["mention_count"] = mc
+            arg["date"] = vd["published_at"]
+            arg["likes"] = vd["likes"]
+            arg["views"] = vd["views"]
+            return arg
+
+        def _attach_comment_meta(arg: dict, meta: dict) -> dict:
+            arg["rank"] = meta["rank"]
+            arg["date"] = meta["published_at"]
+            arg["likes"] = meta["likes"]
+            arg["views"] = ""
+            return arg
+
+        # Reuse cached transcript arguments for videos already processed in a past run
+        for vd in video_data:
+            if vd["video_id"] in video_cache:
+                for cached_arg in video_cache[vd["video_id"]].get("transcript_args", []):
+                    arg = _attach_transcript_meta(dict(cached_arg), vd)
+                    cat = arg.get("category")
+                    if cat in raw_arguments:
+                        raw_arguments[cat].append(arg)
+
+        # Reuse cached comment arguments for comments already processed in a past run
+        for vd in video_data:
+            for c in vd["comments"]:
+                cached = comment_cache.get(c["comment_id"])
+                if cached is None:
+                    continue
+                cached_arg = cached.get("argument")
+                if not cached_arg:
+                    continue
+                arg = dict(cached_arg)
+                arg["comment"] = c["comment"]
+                arg["source_url"] = vd["url"]
+                arg["source_title"] = vd["title"]
+                arg["source_type"] = "comment"
+                arg = _attach_comment_meta(arg, c)
+                cat = arg.get("category")
+                if cat in raw_arguments:
+                    raw_arguments[cat].append(arg)
+
         audio_futures: dict = {}
         comment_futures: dict = {}
 
@@ -1090,11 +1318,12 @@ def main() -> None:
         _lock = threading.Lock()
         t_done = 0
         c_done = 0
+        n_comment_jobs = sum(1 for vd in video_data if vd["new_comments"])
 
-        # Phase 4b: parallel Gemini extraction (audio upload + comment batches)
+        # Phase 4b: parallel Gemini extraction (audio upload + comment batches) — new work only
         log.info("  Phase 4b: parallel Gemini extraction...")
         with ThreadPoolExecutor(max_workers=GEMINI_WORKERS) as executor:
-            for vd in video_data:
+            for vd in videos_needing_audio:
                 if vd.get("audio_path"):
                     f = executor.submit(
                         extract_transcript_arguments,
@@ -1102,10 +1331,11 @@ def main() -> None:
                     )
                     audio_futures[f] = vd
 
-                if vd["comments"]:
+            for vd in video_data:
+                if vd["new_comments"]:
                     f = executor.submit(
                         extract_comment_arguments,
-                        gemini, vd["url"], vd["title"], vd["comments"], car_name,
+                        gemini, vd["url"], vd["title"], vd["new_comments"], car_name,
                     )
                     comment_futures[f] = vd
 
@@ -1113,10 +1343,12 @@ def main() -> None:
                 vd = audio_futures[future]
                 try:
                     args = future.result()
+                    # Cache the raw (pre-metadata) extraction so a future run can skip
+                    # this video's audio download + Gemini call entirely.
+                    video_cache[vd["video_id"]] = {"transcript_args": [dict(a) for a in args]}
                     found = {cat: 0 for cat in CATEGORIES}
                     for arg in args:
-                        mc = arg.pop("mention_count", 1)
-                        arg["rank"] = vd["video_rank"] * math.log(1 + mc)
+                        arg = _attach_transcript_meta(arg, vd)
                         cat = arg.get("category")
                         if cat in raw_arguments:
                             with _lock:
@@ -1127,7 +1359,7 @@ def main() -> None:
                         done_now = t_done
                     summary = ", ".join(f"{cat}:{n}" for cat, n in found.items() if n)
                     log.info(
-                        f"  [audio {done_now}/{n_audio_videos}] "
+                        f"  [audio {done_now}/{len(videos_needing_audio)}] "
                         f"{vd['title'][:55]} → {summary or 'no args'}"
                     )
                 except Exception as e:
@@ -1137,28 +1369,43 @@ def main() -> None:
                 vd = comment_futures[future]
                 try:
                     args = future.result()
-                    rank_lookup = {c["comment"]: c["rank"] for c in vd["comments"]}
+                    meta_lookup = {c["comment"]: c for c in vd["new_comments"]}
+                    matched_ids: set[str] = set()
                     found = {cat: 0 for cat in CATEGORIES}
                     for arg in args:
-                        c_text = arg.get("comment", "")
-                        arg["rank"] = rank_lookup.get(c_text, 0.0)
+                        meta = meta_lookup.get(arg.get("comment", ""))
+                        if not meta:
+                            continue
+                        matched_ids.add(meta["comment_id"])
+                        arg = _attach_comment_meta(arg, meta)
                         cat = arg.get("category")
                         if cat in raw_arguments:
                             with _lock:
                                 raw_arguments[cat].append(arg)
                             found[cat] += 1
+                        comment_cache[meta["comment_id"]] = {
+                            "argument": {"category": arg.get("category"), "argument": arg.get("argument")},
+                        }
+                    # Mark every new comment that produced no argument as processed too,
+                    # so it isn't resent to Gemini on the next run.
+                    for c in vd["new_comments"]:
+                        if c["comment_id"] not in matched_ids:
+                            comment_cache[c["comment_id"]] = {"argument": None}
                     with _lock:
                         c_done += 1
                         done_now = c_done
-                    n_batches = math.ceil(len(vd["comments"]) / COMMENT_BATCH_SIZE)
+                    n_batches = math.ceil(len(vd["new_comments"]) / COMMENT_BATCH_SIZE)
                     summary = ", ".join(f"{cat}:{n}" for cat, n in found.items() if n)
                     log.info(
-                        f"  [comments  {done_now}/{n_comment_videos}] "
+                        f"  [comments  {done_now}/{n_comment_jobs}] "
                         f"{vd['title'][:55]} ({n_batches} batch{'es' if n_batches>1 else ''}) "
                         f"→ {summary or 'no args'}"
                     )
                 except Exception as e:
                     log.warning(f"Comment future error ({vd['url']}): {e}")
+
+        # Persist cache updates (audio + comments) for this car right away.
+        _save_json_cache(cache_path, cache)
 
         for cat, args in raw_arguments.items():
             log.info(f"  Raw arguments — {cat}: {len(args)}")
@@ -1207,6 +1454,20 @@ def main() -> None:
 
     sources_path = OUTPUT_DIR / "koleos_filante_sources_deep_dive.csv"
     build_sources_csv(results_per_car, sources_path)
+
+    log.info("Step 7: Generating evolution graphs...")
+    build_evolution_graphs(results_per_car, OUTPUT_DIR / "graphs")
+
+    usage = get_token_usage()
+    cost = (
+        usage["prompt_tokens"] / 1_000_000 * INPUT_PRICE_PER_1M
+        + usage["output_tokens"] / 1_000_000 * OUTPUT_PRICE_PER_1M
+    )
+    log.info(
+        f"TOKEN USAGE: calls={usage['calls']} prompt_tokens={usage['prompt_tokens']:,} "
+        f"output_tokens={usage['output_tokens']:,} total_tokens={usage['prompt_tokens'] + usage['output_tokens']:,}"
+    )
+    log.info(f"ESTIMATED COST (gemini-3.1-flash-lite standard rate): ${cost:.4f}")
 
     log.info(f"\nDone. Report: {output_path}")
 
