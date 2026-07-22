@@ -47,6 +47,7 @@ from docx.oxml import OxmlElement
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.dates
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -93,6 +94,14 @@ OUTPUT_PRICE_PER_1M = 1.50
 CAR_NAMES = {
     "koleos": "Renault Grand Koleos",
     "filante": "Renault Filante",
+}
+
+# Official name-announcement / unveiling date for each car — evolution graphs are
+# clipped to start here so we don't pick up chatter about earlier-generation models
+# (e.g. Koleos/QM6/QM5) that predates the current model's identity.
+CAR_LAUNCH_DATE = {
+    "koleos": "2024-06-27",   # Busan International Mobility Show unveiling
+    "filante": "2026-01-05",  # Filante name announced with teaser images
 }
 
 # Korean search queries per car — focused on non-purchase & competitor preference
@@ -1072,6 +1081,8 @@ def build_evolution_graphs(results_per_car: dict, output_dir: Path, top_n: int =
 
     for car_key, car_name in CAR_NAMES.items():
         car_results = results_per_car.get(car_key, {})
+        launch_date = pd.to_datetime(CAR_LAUNCH_DATE.get(car_key))
+
         for category in CATEGORIES:
             merged_args = car_results.get(category, [])[:top_n]
             if not merged_args:
@@ -1093,6 +1104,8 @@ def build_evolution_graphs(results_per_car: dict, output_dir: Path, top_n: int =
                         ts = pd.to_datetime(date_str)
                     except (ValueError, TypeError):
                         continue
+                    if launch_date is not None and ts < launch_date:
+                        continue  # predates this model's official unveiling — skip
                     rows.append({"date": ts, "weight": weight})
 
                 if not rows:
@@ -1116,6 +1129,9 @@ def build_evolution_graphs(results_per_car: dict, output_dir: Path, top_n: int =
             ax.set_title(f"{car_name} — {label_cat}\nWeighted mention volume over time (top {top_n} arguments)")
             ax.set_xlabel("Week")
             ax.set_ylabel("Weighted mentions (summed source rank)")
+            if launch_date is not None:
+                right = ax.get_xlim()[1]
+                ax.set_xlim(left=matplotlib.dates.date2num(launch_date), right=right)
             ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.01, 1.0))
             ax.grid(True, alpha=0.3)
             fig.autofmt_xdate()
