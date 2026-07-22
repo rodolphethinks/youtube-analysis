@@ -369,6 +369,13 @@ class MergedArgument(BaseModel):
 class MergedArguments(BaseModel):
     merged_arguments: list[MergedArgument]
 
+class TranslatedQuote(BaseModel):
+    index: int = Field(description="0-based index matching the input quote list")
+    english: str = Field(description="Natural, concise English translation of the quote")
+
+class TranslatedQuotes(BaseModel):
+    translations: list[TranslatedQuote]
+
 
 # ── Gemini helpers ─────────────────────────────────────────────────────────────
 
@@ -743,6 +750,13 @@ def merge_and_rerank(
                 "quote": r["quotes"][0]["text"] if r.get("quotes") else "",
                 "source_url": r["quotes"][0]["source_url"] if r.get("quotes") else "",
                 "source_type": r["quotes"][0]["source_type"] if r.get("quotes") else "",
+                # Carry the representative quote's date/likes/views through too — without
+                # these, _merge_chunk's deterministic quote selection in pass 2 falls back
+                # to blank metadata for every quote, since p1_as_args entries (unlike raw
+                # per-source argument dicts) wouldn't otherwise have these keys at all.
+                "date": r["quotes"][0].get("date", "") if r.get("quotes") else "",
+                "likes": r["quotes"][0].get("likes", "") if r.get("quotes") else "",
+                "views": r["quotes"][0].get("views", "") if r.get("quotes") else "",
                 "source_count": r.get("source_count", 1),
                 "source_items": r.get("source_items", []),
             }
@@ -778,6 +792,49 @@ def merge_and_rerank(
             f["combined_rank"] = round(f.get("combined_rank", 0.0) / max_rank, 4)
 
     return final
+
+
+_HANGUL_RE = re.compile(r"[\uac00-\ud7a3]")
+
+
+def translate_quotes(client: genai.Client, texts: list[str]) -> dict[str, str]:
+    """
+    Batch-translate a list of (mostly Korean) quote texts to natural English via
+    Gemini, so the docx report can show every quote bilingually. Texts with no
+    Hangul characters (already English) are returned unchanged, saving tokens.
+    Returns a dict mapping original text -> English translation.
+    """
+    to_translate: list[str] = []
+    result: dict[str, str] = {}
+    seen: set[str] = set()
+    for t in texts:
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        if _HANGUL_RE.search(t):
+            to_translate.append(t)
+        else:
+            result[t] = t
+
+    batch_size = 40
+    for i in range(0, len(to_translate), batch_size):
+        batch = to_translate[i:i + batch_size]
+        lines = "\n".join(f"[{j}] {txt}" for j, txt in enumerate(batch))
+        prompt = (
+            "Translate each of the following Korean (or mixed Korean/English) YouTube "
+            "comment/transcript quotes into natural, concise English for a management "
+            "report. Preserve meaning and tone (including sarcasm or complaints). "
+            "Return exactly one translation per input index.\n\n" + lines
+        )
+        resp = _gemini_call(client, prompt, TranslatedQuotes)
+        if resp:
+            for tr in resp.translations:
+                if 0 <= tr.index < len(batch):
+                    result[batch[tr.index]] = tr.english
+        for txt in batch:
+            result.setdefault(txt, txt)
+
+    return result
 
 
 # ── Docx helpers ───────────────────────────────────────────────────────────────
@@ -845,6 +902,13 @@ def _add_argument_block(doc: Document, rank_idx: int, merged: dict) -> None:
         quote_run.italic = True
         quote_run.font.size = Pt(9.5)
         quote_run.font.color.rgb = RGBColor(0x33, 0x33, 0x55)
+
+        text_en = q.get("text_en", "").strip()
+        if text_en and text_en != q_text:
+            en_run = q_para.add_run(f'\n   EN: "{text_en}"')
+            en_run.italic = True
+            en_run.font.size = Pt(9)
+            en_run.font.color.rgb = RGBColor(0x55, 0x55, 0x77)
 
         meta_bits = []
         q_date = q.get("date", "")
@@ -1462,6 +1526,23 @@ def main() -> None:
                 merged_results[cat] = []
 
         results_per_car[car_key] = merged_results
+
+    # ── Step 5b: translate quotes to English for bilingual docx display ────────
+    log.info("\nStep 5b: Translating quotes to English...")
+    all_quote_texts = [
+        q.get("text", "")
+        for car_results in results_per_car.values()
+        for merged_list in car_results.values()
+        for merged in merged_list
+        for q in merged.get("quotes", [])
+    ]
+    translations = translate_quotes(gemini, all_quote_texts)
+    for car_results in results_per_car.values():
+        for merged_list in car_results.values():
+            for merged in merged_list:
+                for q in merged.get("quotes", []):
+                    q["text_en"] = translations.get(q.get("text", ""), "")
+    log.info(f"  Translated {len(translations)} unique quote(s).")
 
     # ── Step 6: Generate .docx report ─────────────────────────────────────────
     log.info("\nStep 6: Generating .docx report...")
