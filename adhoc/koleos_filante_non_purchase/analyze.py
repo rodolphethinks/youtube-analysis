@@ -139,6 +139,23 @@ CATEGORY_LABELS = {
     "regret":       "Post-Purchase Regret",
 }
 
+# Title allowlist — a video's title must reference the car by name (space-insensitive)
+# to be processed further. Deliberately "그랑콜레오스" (Grand Koleos), NOT bare "콜레오스",
+# since plain Koleos is the discontinued QM5/QM6-era model we no longer manufacture and
+# don't want mixed into this analysis. Broad search queries (e.g. "...VS", "...경쟁차")
+# otherwise pull in unrelated Korean videos (other cars, or completely off-topic content)
+# that waste extraction cost and can pollute the argument set.
+CAR_TITLE_KEYWORDS: dict[str, list[str]] = {
+    "koleos": ["그랑콜레오스", "그랑콜"],
+    "filante": ["필랑트"],
+}
+
+
+def _title_matches_car(title: str, car_key: str) -> bool:
+    """Space-insensitive check that a video title actually names the target car."""
+    normalized = title.replace(" ", "")
+    return any(kw in normalized for kw in CAR_TITLE_KEYWORDS.get(car_key, []))
+
 
 # ── YouTube helpers ────────────────────────────────────────────────────────────
 
@@ -456,15 +473,32 @@ def extract_transcript_arguments(
     audio_path: str,    # pre-downloaded audio file path (empty string = skip)
     car_name: str,
     mime_type: str = "audio/mp4",
+    car_key: str = "",
 ) -> list[dict]:
     """
     Upload a pre-downloaded audio file to Gemini Files API and extract arguments.
     audio_path must exist. Returns [] if path is empty or upload fails.
+
+    If the video's title doesn't explicitly name the target car (title_confirms_car is
+    False), extraction is held to a stricter bar: both the prompt and a deterministic
+    post-filter require the quote itself to explicitly reference the car, since ambient
+    context (title) doesn't already establish what the video/audio is about.
     """
     if not audio_path or not os.path.exists(audio_path):
         return []
 
     video_id = video_url.split("v=")[-1].split("&")[0]
+    title_confirms_car = _title_matches_car(title, car_key)
+    strict_clause = (
+        (
+            f"\nIMPORTANT: This video's title does NOT explicitly mention the {car_name} by name, "
+            f"so it may be primarily about a different car or a general/comparison topic. Apply STRICT "
+            f"scrutiny: only extract an item if the quote itself explicitly names the {car_name} "
+            f"(e.g. contains \"그랑콜레오스\", \"그랑콜\", or \"필랑트\") — skip anything that sounds like a "
+            f"plausible car complaint but doesn't explicitly reference the {car_name} by name.\n"
+        )
+        if not title_confirms_car else ""
+    )
 
     try:
         uploaded = client.files.upload(
@@ -496,6 +530,7 @@ def extract_transcript_arguments(
             f'- Example of what to SKIP: "{car_name} has better handling and a more efficient hybrid than '
             f'Hyundai/Kia" — this is POSITIVE about the {car_name}; do not extract it under any category.\n'
             f"- General industry/market commentary not tied to a specific purchase decision\n\n"
+            f"{strict_clause}"
             f"Rules:\n"
             f"- Only include arguments clearly stated or strongly implied in the audio\n"
             f"- argument: concise English sentence (max 20 words)\n"
@@ -507,7 +542,7 @@ def extract_transcript_arguments(
         result = _gemini_call(client, prompt, TranscriptArguments, contents=[prompt, uploaded])
         if not result:
             return []
-        return [
+        items = [
             {
                 "category": arg.category,
                 "argument": arg.argument,
@@ -520,6 +555,9 @@ def extract_transcript_arguments(
             for arg in result.arguments
             if arg.category in CATEGORIES
         ]
+        if not title_confirms_car:
+            items = [it for it in items if _title_matches_car(it["quote"], car_key)]
+        return items
     finally:
         try:
             client.files.delete(name=uploaded.name)
@@ -537,12 +575,29 @@ def extract_comment_arguments(
     title: str,
     comments: list[dict],
     car_name: str,
+    car_key: str = "",
 ) -> list[dict]:
     """
     Send comments in batches of COMMENT_BATCH_SIZE to Gemini.
     Returns list of {category, argument, comment, comment_likes, source_url, source_title, source_type}.
+
+    If the video's title doesn't explicitly name the target car, extraction is held to a
+    stricter bar: both the prompt and a deterministic post-filter require the comment
+    itself to explicitly reference the car, since ambient context (title) doesn't already
+    establish what the video is about.
     """
     results: list[dict] = []
+    title_confirms_car = _title_matches_car(title, car_key)
+    strict_clause = (
+        (
+            f"\nIMPORTANT: This video's title does NOT explicitly mention the {car_name} by name, "
+            f"so it may be primarily about a different car or a general/comparison topic. Apply STRICT "
+            f"scrutiny: only extract a comment if it explicitly names the {car_name} "
+            f"(e.g. contains \"그랑콜레오스\", \"그랑콜\", or \"필랑트\") — skip anything that sounds like a "
+            f"plausible car complaint but doesn't explicitly reference the {car_name} by name.\n\n"
+        )
+        if not title_confirms_car else ""
+    )
 
     likes_lookup: dict[str, int] = {}
     for c in comments:
@@ -572,21 +627,25 @@ def extract_comment_arguments(
             f"{car_name} would be chosen instead\n"
             f'- Example of what to SKIP: "{car_name} has better handling and a more efficient hybrid than '
             f'Hyundai/Kia" — this is POSITIVE about the {car_name}; do not extract it under any category.\n\n'
+            f"{strict_clause}"
             f"Video: {title}\nComments:\n{numbered}"
         )
         result = _gemini_call(client, prompt, CommentArguments)
         if result:
             for item in result.items:
-                if item.category in CATEGORIES:
-                    results.append({
-                        "comment": item.comment,
-                        "argument": item.argument,
-                        "category": item.category,
-                        "comment_likes": likes_lookup.get(item.comment, 0),
-                        "source_url": video_url,
-                        "source_title": title,
-                        "source_type": "comment",
-                    })
+                if item.category not in CATEGORIES:
+                    continue
+                if not title_confirms_car and not _title_matches_car(item.comment, car_key):
+                    continue
+                results.append({
+                    "comment": item.comment,
+                    "argument": item.argument,
+                    "category": item.category,
+                    "comment_likes": likes_lookup.get(item.comment, 0),
+                    "source_url": video_url,
+                    "source_title": title,
+                    "source_type": "comment",
+                })
 
         time.sleep(0.3)
 
@@ -1239,13 +1298,27 @@ def main() -> None:
         log.info(f"Total unique videos found: {len(video_dict)}")
 
         # ── Step 2: Fetch video details ────────────────────────────────────────
+        # NOTE: we deliberately do NOT drop videos whose title doesn't mention the
+        # car — the search net stays broad (e.g. competitor-comparison videos titled
+        # after the rival car can still contain legitimate comments about our car).
+        # Title relevance is instead used later (Step 4) to apply stricter
+        # per-quote scrutiny when extracting arguments from these videos.
         log.info("Step 2: Fetching video details...")
         video_details: list[dict] = []
+        title_confirmed = 0
         for url, video_id in video_dict.items():
             details = get_video_details(yt, video_id)
-            if details:
-                video_details.append(details)
+            if not details:
+                continue
+            video_details.append(details)
+            if _title_matches_car(details["title"], car_key):
+                title_confirmed += 1
             time.sleep(0.05)
+
+        log.info(
+            f"  Title relevance: {title_confirmed}/{len(video_details)} videos "
+            f"explicitly mention {car_name} in the title"
+        )
 
         if not video_details:
             log.warning(f"No video details returned for {car_name} — skipping.")
@@ -1407,7 +1480,7 @@ def main() -> None:
                 if vd.get("audio_path"):
                     f = executor.submit(
                         extract_transcript_arguments,
-                        gemini, vd["url"], vd["title"], vd["audio_path"], car_name, vd["audio_mime"],
+                        gemini, vd["url"], vd["title"], vd["audio_path"], car_name, vd["audio_mime"], car_key,
                     )
                     audio_futures[f] = vd
 
@@ -1415,7 +1488,7 @@ def main() -> None:
                 if vd["new_comments"]:
                     f = executor.submit(
                         extract_comment_arguments,
-                        gemini, vd["url"], vd["title"], vd["new_comments"], car_name,
+                        gemini, vd["url"], vd["title"], vd["new_comments"], car_name, car_key,
                     )
                     comment_futures[f] = vd
 
